@@ -1,0 +1,80 @@
+name: Generate Types and Publish Package
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version (overrides tag)'
+        required: false
+
+jobs:
+  build-pack-publish:
+    runs-on: windows-latest
+    env:
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Show Windows SDK Debuggers (if present)
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$Env:ProgramFiles(x86)\Windows Kits\10\Debuggers\x64",
+            "$Env:ProgramFiles\Windows Kits\10\Debuggers\x64",
+            "$Env:ProgramFiles(x86)\Windows Kits\10\Debuggers\x86"
+          )
+          $candidates | ForEach-Object { if (Test-Path $_) { Write-Host "Found: $_" } }
+
+      - name: Build generator
+        run: dotnet build ntoskrnlib\ntoskrnlib.csproj -c Release
+
+      - name: Ensure DIA is registered (best-effort)
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\Enterprise\DIA SDK\bin\amd64\msdia140.dll",
+            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\Professional\DIA SDK\bin\amd64\msdia140.dll",
+            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\Community\DIA SDK\bin\amd64\msdia140.dll"
+          )
+          foreach ($dll in $candidates) {
+            if (Test-Path $dll) { Start-Process regsvr32.exe -ArgumentList '/s', $dll -Wait -NoNewWindow; Write-Host "Registered: $dll"; break }
+          }
+
+      - name: Generate types from config into ntoskrnlib.Types/Generated
+        shell: pwsh
+        env:
+          _NT_SYMBOL_PATH: srv*${{ runner.temp }}\symbols*https://msdl.microsoft.com/download/symbols
+        run: |
+          New-Item -ItemType Directory -Force -Path ntoskrnlib.Types\Generated | Out-Null
+          (Get-Content config\types.yml) -replace 'ntoskrnlib_placeholder.exe','ntoskrnl.exe' | Set-Content config\types.yml
+          dotnet run --project ntoskrnlib\ntoskrnlib.csproj -- --config config\types.yml -o ntoskrnlib.Types\Generated
+          Get-ChildItem ntoskrnlib.Types\Generated -Recurse | Write-Host
+
+      - name: Compute version
+        id: getver
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}"
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and '${{ inputs.version }}') { $ver = '${{ inputs.version }}' }
+          if ($ver -like 'v*') { $ver = $ver.Substring(1) }
+          if (-not $ver) { $ver = "0.0.0-local" }
+          echo "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Pack ntoskrnlib.Types
+        run: dotnet pack ntoskrnlib.Types\ntoskrnlib.Types.csproj -c Release -o artifacts /p:PackageVersion=${{ steps.getver.outputs.version }}
+
+      - name: Publish to NuGet
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        if: ${{ env.NUGET_API_KEY != '' }}
+        run: dotnet nuget push artifacts\*.nupkg --api-key $Env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json --skip-duplicate

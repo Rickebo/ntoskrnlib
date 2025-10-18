@@ -1,0 +1,8 @@
+types:
+  - module: C:\\Windows\\System32\\ntoskrnlib_placeholder.exe
+    flatten: true
+    names: [ _EPROCESS ]
+  - module: C:\\Windows\\System32\\ntdll.dll
+    flatten: false
+    names: [ _PEB, _UNICODE_STRING, _LIST_ENTRY ]
+
