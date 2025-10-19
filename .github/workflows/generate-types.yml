@@ -4,7 +4,7 @@ on:
   push:
     branches: [ master ]
     paths-ignore:
-      - 'ntoskrnlib.Types/Generated/**'
+      - 'ntoskrnlib/Generated/**'
   workflow_dispatch:
     inputs:
       version:
@@ -14,10 +14,78 @@ on:
     - cron: '0 6 * * *'
 
 jobs:
-  build-pack-publish:
+  version:
+    name: Compute base version
+    runs-on: ubuntu-latest
+    outputs:
+      base: ${{ steps.set.outputs.base }}
+      latest: ${{ steps.set.outputs.latest }}
+      label: ${{ steps.set.outputs.label }}
+      explicit: ${{ steps.set.outputs.explicit }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install convco
+        run: |
+          curl -sSL -o /tmp/convco.tgz https://github.com/convco/convco/releases/latest/download/convco-x86_64-unknown-linux-gnu.tar.gz
+          mkdir -p "$HOME/bin" && tar -xzf /tmp/convco.tgz -C "$HOME/bin" convco
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          convco --version || true
+
+      - name: Compute base version
+        id: set
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          pkg=ntoskrnlib
+          url="https://api.nuget.org/v3-flatcontainer/$pkg/index.json"
+          if command -v jq >/dev/null 2>&1; then
+            latest=$(curl -fsSL "$url" | jq -r '[.versions[] | select(test("-")|not)][-1] // "0.0.0"')
+          else
+            json=$(curl -fsSL "$url" || echo '{}')
+            latest=$(printf '%s' "$json" | tr -d '\n\r ' | sed 's/.*"versions":\[\(.*\)\].*/\1/' | tr ',' '\n' | tr -d '"' | grep -v '-' | tail -n 1)
+            latest=${latest:-0.0.0}
+          fi
+          label=none
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            git tag --list 'v*' | grep -q . || git tag v0.0.0
+            label=$(convco version --label --bump || echo none)
+          fi
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            echo "explicit=true" >> $GITHUB_OUTPUT
+            echo "base=$INPUT_VERSION" >> $GITHUB_OUTPUT
+            echo "latest=$latest" >> $GITHUB_OUTPUT
+            echo "label=$label" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          IFS=. read -r maj min pat <<< "$latest"
+          maj=${maj:-0}; min=${min:-0}; pat=${pat:-0}
+          case "$label" in
+            major) maj=$((maj+1)); min=0; pat=0;;
+            minor) min=$((min+1)); pat=0;;
+            *) :;;
+          esac
+          base="$maj.$min.$pat"
+          echo "explicit=false" >> $GITHUB_OUTPUT
+          echo "base=$base" >> $GITHUB_OUTPUT
+          echo "latest=$latest" >> $GITHUB_OUTPUT
+          echo "label=$label" >> $GITHUB_OUTPUT
+
+  build:
+    name: Build, generate, compare
     runs-on: windows-latest
+    needs: version
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      version: ${{ steps.out.outputs.version }}
+      changed: ${{ steps.out.outputs.changed }}
+      is_new: ${{ steps.out.outputs.is_new }}
     env:
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: true
@@ -33,26 +101,12 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
-      - name: Install convco (Conventional Commits tool)
-        shell: pwsh
-        run: |
-          $url = 'https://github.com/convco/convco/releases/latest/download/convco-windows.zip'
-          $zip = Join-Path $env:RUNNER_TEMP 'convco.zip'
-          Invoke-WebRequest $url -OutFile $zip
-          $dst = Join-Path $env:RUNNER_TEMP 'convco'
-          Expand-Archive -Path $zip -DestinationPath $dst -Force
-          "$dst" | Out-File -Append -FilePath $env:GITHUB_PATH
-          convco --version
-
       - name: Prepare symbol tooling (PATH and cache)
         shell: pwsh
         run: |
-          # Create a symbol cache under the runner temp and export _NT_SYMBOL_PATH for subsequent steps
           $cache = Join-Path $env:RUNNER_TEMP 'symbols'
           New-Item -ItemType Directory -Force -Path $cache | Out-Null
           "_NT_SYMBOL_PATH=srv*$cache*https://msdl.microsoft.com/download/symbols" | Out-File -Append -FilePath $env:GITHUB_ENV
-
-          # Add common Debugging Tools locations (dbghelp/symsrv) to PATH for the rest of the job
           $candidates = @(
             "$Env:ProgramFiles(x86)\Windows Kits\10\Debuggers\x64",
             "$Env:ProgramFiles\Windows Kits\10\Debuggers\x64",
@@ -60,26 +114,8 @@ jobs:
           )
           foreach ($p in $candidates) { if (Test-Path $p) { $p | Out-File -Append -FilePath $env:GITHUB_PATH; Write-Host "Added to PATH: $p" } }
 
-      - name: Probe symbol components
-        shell: pwsh
-        run: |
-          Write-Host "_NT_SYMBOL_PATH=$Env:_NT_SYMBOL_PATH"
-          Write-Host "PATH entries with Debuggers:"; ($env:PATH -split ';' | Where-Object { $_ -match 'Debuggers' })
-          Write-Host "where dbghelp.dll:"; where.exe dbghelp.dll || $true
-          Write-Host "where symsrv.dll:"; where.exe symsrv.dll || $true
-
-      - name: Show Windows SDK Debuggers (if present)
-        shell: pwsh
-        run: |
-          $candidates = @(
-            "$Env:ProgramFiles(x86)\Windows Kits\10\Debuggers\x64",
-            "$Env:ProgramFiles\Windows Kits\10\Debuggers\x64",
-            "$Env:ProgramFiles(x86)\Windows Kits\10\Debuggers\x86"
-          )
-          $candidates | ForEach-Object { if (Test-Path $_) { Write-Host "Found: $_" } }
-
       - name: Build generator
-        run: dotnet build ntoskrnlib\ntoskrnlib.Generator.csproj -c Release
+        run: dotnet build ntoskrnlib.Generator\ntoskrnlib.Generator.csproj -c Release
 
       - name: Ensure DIA is registered (best-effort)
         shell: pwsh
@@ -94,40 +130,34 @@ jobs:
             if (Test-Path $dll) { Start-Process regsvr32.exe -ArgumentList '/s', $dll -Wait -NoNewWindow; Write-Host "Registered: $dll"; break }
           }
 
-      - name: Generate types from config into ntoskrnlib.Types/Generated
+      - name: Generate types
         shell: pwsh
         env:
           _NT_SYMBOL_PATH: srv*${{ runner.temp }}\symbols*https://msdl.microsoft.com/download/symbols
         run: |
-          New-Item -ItemType Directory -Force -Path ntoskrnlib.Types\Generated | Out-Null
+          New-Item -ItemType Directory -Force -Path ntoskrnlib\Generated | Out-Null
           (Get-Content config\types.yml) -replace 'ntoskrnlib_placeholder.exe','ntoskrnl.exe' | Set-Content config\types.yml
-          dotnet run --project ntoskrnlib\ntoskrnlib.Generator.csproj -- --config config\types.yml -o ntoskrnlib.Types\Generated
-          Get-ChildItem ntoskrnlib.Types\Generated -Recurse | Write-Host
+          dotnet run --project ntoskrnlib.Generator\ntoskrnlib.Generator.csproj -- --config config\types.yml -o ntoskrnlib\Generated
 
-      - name: Build library (for content comparison)
-        run: dotnet build ntoskrnlib.Types\ntoskrnlib.csproj -c Release
+      - name: Build library
+        run: dotnet build ntoskrnlib\ntoskrnlib.csproj -c Release
 
-      - name: Compute version (convco + NuGet diff)
-        id: ver
+      - name: Pack with base version
         shell: pwsh
         run: |
-          $explicit = '${{ inputs.version }}'
-          if ($explicit) {
-            echo "version=$explicit" >> $env:GITHUB_OUTPUT
-            echo "publish=true" >> $env:GITHUB_OUTPUT
-            exit 0
-          }
+          $verBase = '${{ needs.version.outputs.base }}'
+          dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$verBase
 
+      - name: Compare content and finalize version
+        id: out
+        shell: pwsh
+        run: |
           $pkg = "$Env:PKG_ID"
-          $latest = '0.0.0'
-          try {
-            $json = Invoke-RestMethod -UseBasicParsing -Uri ("https://api.nuget.org/v3-flatcontainer/$pkg/index.json")
-            $versions = @($json.versions) | Where-Object { $_ -notmatch '-' }
-            if ($versions.Count -gt 0) { $latest = $versions[-1] }
-          } catch {}
+          $latest = '${{ needs.version.outputs.latest }}'
+          $base = '${{ needs.version.outputs.base }}'
+          $explicit = '${{ needs.version.outputs.explicit }}'
 
-          # Compare content with the latest published dll
-          $newDll = (Get-ChildItem -Path 'ntoskrnlib.Types\\bin\\Release' -Recurse -Filter 'ntoskrnlib.dll' | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+          $newDll = (Get-ChildItem -Path 'ntoskrnlib\\bin\\Release' -Recurse -Filter 'ntoskrnlib.dll' | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
           $contentChanged = $true
           if ($latest -ne '0.0.0') {
             $nupkgUrl = "https://api.nuget.org/v3-flatcontainer/$pkg/$latest/$pkg.$latest.nupkg"
@@ -142,64 +172,148 @@ jobs:
                 $h2 = (Get-FileHash -Algorithm SHA256 $newDll).Hash
                 $contentChanged = ($h1 -ne $h2)
               }
-            } catch {
-              $contentChanged = $true
+            } catch { $contentChanged = $true }
+          }
+
+          $final = $base
+          if ($explicit -ne 'true') {
+            if ($base -eq $latest -and $contentChanged) {
+              $maj,$min,$pat = ($base -split '\.')
+              $final = "$maj.$min.$([int]$pat + 1)"
             }
           }
 
-          # Bump label from convco for push events
-          $label = 'none'
-          if ($env:GITHUB_EVENT_NAME -eq 'push') {
-            $hasTag = (git tag --list 'v*' | Measure-Object).Count -gt 0
-            if (-not $hasTag) { git tag v0.0.0 }
-            try { $label = (convco version --label --bump).Trim() } catch { $label = 'none' }
+          if ($final -ne $base) {
+            Remove-Item artifacts\*.nupkg -Force -ErrorAction SilentlyContinue
+            dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$final
           }
 
-          # Compute next version from latest + label/content change
-          $maj,$min,$pat = ($latest -split '\.')
-          $maj=[int]$maj; $min=[int]$min; $pat=[int]$pat
-          switch ($label) {
-            'major' { $maj++; $min=0; $pat=0 }
-            'minor' { $min++; $pat=0 }
-            default { if ($contentChanged) { $pat++ } }
-          }
-          $version = "$maj.$min.$pat"
-          $publish = if ($contentChanged) { 'true' } else { 'false' }
-          echo "old=$latest" >> $env:GITHUB_OUTPUT
-          echo "label=$label" >> $env:GITHUB_OUTPUT
+          $idx = Invoke-RestMethod -UseBasicParsing -Uri ("https://api.nuget.org/v3-flatcontainer/$pkg/index.json")
+          $isNew = $true
+          try { $isNew = -not [bool](@($idx.versions) -contains $final) } catch { $isNew = $true }
+
+          echo "version=$final" >> $env:GITHUB_OUTPUT
           echo "changed=$contentChanged" >> $env:GITHUB_OUTPUT
-          echo "version=$version" >> $env:GITHUB_OUTPUT
-          echo "publish=$publish" >> $env:GITHUB_OUTPUT
+          echo "is_new=$isNew" >> $env:GITHUB_OUTPUT
 
-      - name: Pack ntoskrnlib
-        run: dotnet pack ntoskrnlib.Types\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=${{ steps.ver.outputs.version }}
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: artifacts/*.nupkg
 
-      - name: Publish to NuGet
-        if: ${{ steps.ver.outputs.publish == 'true' && secrets.NUGET_API_KEY != '' }}
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        run: dotnet nuget push artifacts\*.nupkg --api-key $Env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json --skip-duplicate
+      - name: Upload generated sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated
+          path: ntoskrnlib/Generated/**
 
-      - name: Commit generated types to repo
-        if: ${{ steps.ver.outputs.publish == 'true' }}
-        shell: pwsh
+  types_pr:
+    name: PR with generated sources
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download generated sources
+        uses: actions/download-artifact@v4
+        with:
+          name: generated
+          path: ./ntoskrnlib/Generated
+
+      - name: Create update branch
+        id: br
+        shell: bash
+        run: |
+          ts=$(date +%Y%m%d-%H%M%S)
+          br="update/generated-$ts"
+          echo "name=$br" >> $GITHUB_OUTPUT
+          git checkout -b "$br"
+
+      - name: Commit changes (if any)
+        id: commit
+        shell: bash
         run: |
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
-          git add ntoskrnlib.Types/Generated
-          if ((git status --porcelain ntoskrnlib.Types/Generated).Length -gt 0) {
-            git commit -m "chore(gen): update generated types for v${{ steps.ver.outputs.version }} [skip ci]"
-            $branch = '${{ github.ref_name }}'
-            if (-not $branch) { $branch = '${{ github.event.repository.default_branch }}' }
-            if (-not $branch) { $branch = 'master' }
-            git push origin HEAD:$branch
-          } else {
-            Write-Host "No changes to commit in Generated."
-          }
+          git add ntoskrnlib/Generated || true
+          if git diff --cached --quiet; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "chore(gen): update generated sources for v${{ needs.build.outputs.version }} [skip ci]"
+          git push --set-upstream origin "${{ steps.br.outputs.name }}"
+          echo "changed=true" >> $GITHUB_OUTPUT
+
+      - name: Create pull request
+        if: steps.commit.outputs.changed == 'true'
+        id: cpr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ steps.br.outputs.name }}
+          title: "chore(gen): update generated sources for v${{ needs.build.outputs.version }}"
+          body: |
+            Automated update of generated sources.
+            Version: `${{ needs.build.outputs.version }}`
+          labels: auto-merge
+          draft: false
+
+      - name: Auto-approve pull request (optional)
+        if: steps.cpr.outputs.pull-request-number && secrets.AUTO_APPROVE_TOKEN != ''
+        uses: hmarr/auto-approve-action@v3
+        with:
+          pull-request-number: ${{ steps.cpr.outputs.pull-request-number }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUTO_APPROVE_TOKEN }}
+
+      - name: Enable auto-merge (optional)
+        if: steps.cpr.outputs.pull-request-number && secrets.AUTO_APPROVE_TOKEN != ''
+        uses: peter-evans/enable-pull-request-automerge@v3
+        with:
+          token: ${{ secrets.AUTO_APPROVE_TOKEN }}
+          pull-request-number: ${{ steps.cpr.outputs.pull-request-number }}
+          merge-method: squash
+
+  publish:
+    name: Publish package
+    runs-on: ubuntu-latest
+    needs: [build, types_pr]
+    if: ${{ needs.build.outputs.changed == 'true' && needs.build.outputs.is_new == 'true' && secrets.NUGET_API_KEY != '' }}
+    permissions:
+      contents: write
+    steps:
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: nupkg
+          path: ./artifacts
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Publish to NuGet
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          dotnet nuget push artifacts/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
 
       - name: Tag repository with version
-        if: ${{ steps.ver.outputs.publish == 'true' }}
-        shell: pwsh
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Push tag
         run: |
-          git tag v${{ steps.ver.outputs.version }} -f
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git tag v${{ needs.build.outputs.version }} -f
           git push --tags --force
