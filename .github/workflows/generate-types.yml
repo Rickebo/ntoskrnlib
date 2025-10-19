@@ -2,28 +2,71 @@ name: Generate Types and Publish Package
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [ master ]
+    paths-ignore:
+      - 'ntoskrnlib.Types/Generated/**'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Package version (overrides tag)'
+        description: 'Optional explicit version (overrides computed)'
         required: false
+  schedule:
+    - cron: '0 6 * * *'
 
 jobs:
   build-pack-publish:
     runs-on: windows-latest
+    permissions:
+      contents: write
     env:
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: true
+      PKG_ID: ntoskrnlib
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
+
+      - name: Install convco (Conventional Commits tool)
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/convco/convco/releases/latest/download/convco-windows.zip'
+          $zip = Join-Path $env:RUNNER_TEMP 'convco.zip'
+          Invoke-WebRequest $url -OutFile $zip
+          $dst = Join-Path $env:RUNNER_TEMP 'convco'
+          Expand-Archive -Path $zip -DestinationPath $dst -Force
+          "$dst" | Out-File -Append -FilePath $env:GITHUB_PATH
+          convco --version
+
+      - name: Prepare symbol tooling (PATH and cache)
+        shell: pwsh
+        run: |
+          # Create a symbol cache under the runner temp and export _NT_SYMBOL_PATH for subsequent steps
+          $cache = Join-Path $env:RUNNER_TEMP 'symbols'
+          New-Item -ItemType Directory -Force -Path $cache | Out-Null
+          "_NT_SYMBOL_PATH=srv*$cache*https://msdl.microsoft.com/download/symbols" | Out-File -Append -FilePath $env:GITHUB_ENV
+
+          # Add common Debugging Tools locations (dbghelp/symsrv) to PATH for the rest of the job
+          $candidates = @(
+            "$Env:ProgramFiles(x86)\Windows Kits\10\Debuggers\x64",
+            "$Env:ProgramFiles\Windows Kits\10\Debuggers\x64",
+            "$Env:ProgramFiles(x86)\Windows Kits\10\Debuggers\x86"
+          )
+          foreach ($p in $candidates) { if (Test-Path $p) { $p | Out-File -Append -FilePath $env:GITHUB_PATH; Write-Host "Added to PATH: $p" } }
+
+      - name: Probe symbol components
+        shell: pwsh
+        run: |
+          Write-Host "_NT_SYMBOL_PATH=$Env:_NT_SYMBOL_PATH"
+          Write-Host "PATH entries with Debuggers:"; ($env:PATH -split ';' | Where-Object { $_ -match 'Debuggers' })
+          Write-Host "where dbghelp.dll:"; where.exe dbghelp.dll || $true
+          Write-Host "where symsrv.dll:"; where.exe symsrv.dll || $true
 
       - name: Show Windows SDK Debuggers (if present)
         shell: pwsh
@@ -36,7 +79,7 @@ jobs:
           $candidates | ForEach-Object { if (Test-Path $_) { Write-Host "Found: $_" } }
 
       - name: Build generator
-        run: dotnet build ntoskrnlib\ntoskrnlib.csproj -c Release
+        run: dotnet build ntoskrnlib\ntoskrnlib.Generator.csproj -c Release
 
       - name: Ensure DIA is registered (best-effort)
         shell: pwsh
@@ -44,7 +87,8 @@ jobs:
           $candidates = @(
             "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\Enterprise\DIA SDK\bin\amd64\msdia140.dll",
             "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\Professional\DIA SDK\bin\amd64\msdia140.dll",
-            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\Community\DIA SDK\bin\amd64\msdia140.dll"
+            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\Community\DIA SDK\bin\amd64\msdia140.dll",
+            "$Env:ProgramFiles\Microsoft Visual Studio\2022\BuildTools\DIA SDK\bin\amd64\msdia140.dll"
           )
           foreach ($dll in $candidates) {
             if (Test-Path $dll) { Start-Process regsvr32.exe -ArgumentList '/s', $dll -Wait -NoNewWindow; Write-Host "Registered: $dll"; break }
@@ -57,24 +101,105 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path ntoskrnlib.Types\Generated | Out-Null
           (Get-Content config\types.yml) -replace 'ntoskrnlib_placeholder.exe','ntoskrnl.exe' | Set-Content config\types.yml
-          dotnet run --project ntoskrnlib\ntoskrnlib.csproj -- --config config\types.yml -o ntoskrnlib.Types\Generated
+          dotnet run --project ntoskrnlib\ntoskrnlib.Generator.csproj -- --config config\types.yml -o ntoskrnlib.Types\Generated
           Get-ChildItem ntoskrnlib.Types\Generated -Recurse | Write-Host
 
-      - name: Compute version
-        id: getver
+      - name: Build library (for content comparison)
+        run: dotnet build ntoskrnlib.Types\ntoskrnlib.csproj -c Release
+
+      - name: Compute version (convco + NuGet diff)
+        id: ver
         shell: pwsh
         run: |
-          $ver = "${{ github.ref_name }}"
-          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and '${{ inputs.version }}') { $ver = '${{ inputs.version }}' }
-          if ($ver -like 'v*') { $ver = $ver.Substring(1) }
-          if (-not $ver) { $ver = "0.0.0-local" }
-          echo "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $explicit = '${{ inputs.version }}'
+          if ($explicit) {
+            echo "version=$explicit" >> $env:GITHUB_OUTPUT
+            echo "publish=true" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
 
-      - name: Pack ntoskrnlib.Types
-        run: dotnet pack ntoskrnlib.Types\ntoskrnlib.Types.csproj -c Release -o artifacts /p:PackageVersion=${{ steps.getver.outputs.version }}
+          $pkg = "$Env:PKG_ID"
+          $latest = '0.0.0'
+          try {
+            $json = Invoke-RestMethod -UseBasicParsing -Uri ("https://api.nuget.org/v3-flatcontainer/$pkg/index.json")
+            $versions = @($json.versions) | Where-Object { $_ -notmatch '-' }
+            if ($versions.Count -gt 0) { $latest = $versions[-1] }
+          } catch {}
+
+          # Compare content with the latest published dll
+          $newDll = (Get-ChildItem -Path 'ntoskrnlib.Types\\bin\\Release' -Recurse -Filter 'ntoskrnlib.dll' | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+          $contentChanged = $true
+          if ($latest -ne '0.0.0') {
+            $nupkgUrl = "https://api.nuget.org/v3-flatcontainer/$pkg/$latest/$pkg.$latest.nupkg"
+            $nupkg = Join-Path $env:RUNNER_TEMP 'prev.nupkg'
+            try {
+              Invoke-WebRequest $nupkgUrl -OutFile $nupkg -UseBasicParsing
+              $extract = Join-Path $env:RUNNER_TEMP 'prev'
+              Expand-Archive -Path $nupkg -DestinationPath $extract -Force
+              $prevDll = Get-ChildItem -Path (Join-Path $extract 'lib') -Recurse -Filter 'ntoskrnlib.dll' | Select-Object -First 1 | ForEach-Object { $_.FullName }
+              if ($prevDll -and (Test-Path $newDll)) {
+                $h1 = (Get-FileHash -Algorithm SHA256 $prevDll).Hash
+                $h2 = (Get-FileHash -Algorithm SHA256 $newDll).Hash
+                $contentChanged = ($h1 -ne $h2)
+              }
+            } catch {
+              $contentChanged = $true
+            }
+          }
+
+          # Bump label from convco for push events
+          $label = 'none'
+          if ($env:GITHUB_EVENT_NAME -eq 'push') {
+            $hasTag = (git tag --list 'v*' | Measure-Object).Count -gt 0
+            if (-not $hasTag) { git tag v0.0.0 }
+            try { $label = (convco version --label --bump).Trim() } catch { $label = 'none' }
+          }
+
+          # Compute next version from latest + label/content change
+          $maj,$min,$pat = ($latest -split '\.')
+          $maj=[int]$maj; $min=[int]$min; $pat=[int]$pat
+          switch ($label) {
+            'major' { $maj++; $min=0; $pat=0 }
+            'minor' { $min++; $pat=0 }
+            default { if ($contentChanged) { $pat++ } }
+          }
+          $version = "$maj.$min.$pat"
+          $publish = if ($contentChanged) { 'true' } else { 'false' }
+          echo "old=$latest" >> $env:GITHUB_OUTPUT
+          echo "label=$label" >> $env:GITHUB_OUTPUT
+          echo "changed=$contentChanged" >> $env:GITHUB_OUTPUT
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "publish=$publish" >> $env:GITHUB_OUTPUT
+
+      - name: Pack ntoskrnlib
+        run: dotnet pack ntoskrnlib.Types\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=${{ steps.ver.outputs.version }}
 
       - name: Publish to NuGet
+        if: ${{ steps.ver.outputs.publish == 'true' && secrets.NUGET_API_KEY != '' }}
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        if: ${{ env.NUGET_API_KEY != '' }}
         run: dotnet nuget push artifacts\*.nupkg --api-key $Env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Commit generated types to repo
+        if: ${{ steps.ver.outputs.publish == 'true' }}
+        shell: pwsh
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add ntoskrnlib.Types/Generated
+          if ((git status --porcelain ntoskrnlib.Types/Generated).Length -gt 0) {
+            git commit -m "chore(gen): update generated types for v${{ steps.ver.outputs.version }} [skip ci]"
+            $branch = '${{ github.ref_name }}'
+            if (-not $branch) { $branch = '${{ github.event.repository.default_branch }}' }
+            if (-not $branch) { $branch = 'master' }
+            git push origin HEAD:$branch
+          } else {
+            Write-Host "No changes to commit in Generated."
+          }
+
+      - name: Tag repository with version
+        if: ${{ steps.ver.outputs.publish == 'true' }}
+        shell: pwsh
+        run: |
+          git tag v${{ steps.ver.outputs.version }} -f
+          git push --tags --force

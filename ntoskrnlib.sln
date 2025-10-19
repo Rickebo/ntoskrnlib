@@ -1,8 +1,8 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ntoskrnlib", "ntoskrnlib\ntoskrnlib.csproj", "{97F446FF-A5F1-40D7-BBA8-ACBA74FDC4A3}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ntoskrnlib.Generator", "ntoskrnlib\ntoskrnlib.Generator.csproj", "{97F446FF-A5F1-40D7-BBA8-ACBA74FDC4A3}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ntoskrnlib.Types", "ntoskrnlib.Types\ntoskrnlib.Types.csproj", "{B4DCEFB6-5B3E-4AC3-9CF6-5AA16F7A88E8}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ntoskrnlib", "ntoskrnlib.Types\ntoskrnlib.csproj", "{B4DCEFB6-5B3E-4AC3-9CF6-5AA16F7A88E8}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
