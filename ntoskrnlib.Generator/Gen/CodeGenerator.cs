@@ -136,13 +136,16 @@ internal sealed class CodeGenerator
             structDecl = structDecl.AddMembers(fieldDecl);
         }
 
-        MemberDeclarationSyntax topDecl = structDecl;
         if (!string.IsNullOrWhiteSpace(_ns))
         {
-            topDecl = SyntaxFactory.FileScopedNamespaceDeclaration(SyntaxFactory.ParseName(_ns!)).AddMembers(structDecl);
+            var nsDecl = SyntaxFactory.NamespaceDeclaration(SyntaxFactory.ParseName(_ns!))
+                .AddMembers(structDecl);
+            cu = cu.AddMembers(nsDecl);
         }
-
-        cu = cu.AddMembers(topDecl);
+        else
+        {
+            cu = cu.AddMembers(structDecl);
+        }
         return cu.NormalizeWhitespace().ToFullString();
     }
 

@@ -8,10 +8,12 @@ namespace ntoskrnlib.Gen;
 internal sealed class DiaEmitter
 {
     private readonly DiaInspector _dia;
+    private readonly string _ns;
 
-    public DiaEmitter(DiaInspector dia)
+    public DiaEmitter(DiaInspector dia, string ns)
     {
         _dia = dia;
+        _ns = ns;
     }
 
     public int GenerateWithDependencies(string rootDisplayName, string outputDir, bool flatten)
@@ -32,10 +34,13 @@ internal sealed class DiaEmitter
             var typeName = sym.name ?? disp;
             if (!seen.Add(typeName)) continue;
 
-            var code = ProgramHelpers.GenerateFromDia(typeName, _dia, sym, flatten);
+            var code = ProgramHelpers.GenerateFromDia(typeName, _dia, sym, flatten, _ns);
             var file = Path.Combine(outputDir, ProgramHelpers.Sanitize(typeName) + ".g.cs");
-            File.WriteAllText(file, code);
-            written++;
+            if (!File.Exists(file))
+            {
+                File.WriteAllText(file, code);
+                written++;
+            }
 
             if (!flatten)
             {
@@ -71,4 +76,3 @@ internal sealed class DiaEmitter
         return (SymTagEnum)t.symTag == SymTagEnum.SymTagUDT ? t : null;
     }
 }
-

@@ -46,15 +46,49 @@ internal sealed class GenerationRunner : IGenerationRunner
 
         using var session = _sessionFactory.Create(opts.Module);
         var insp = new TypeInspector(session);
-        var ns = DeriveNamespaceFromModule(opts.Module);
+        var (moduleId, ns) = DeriveModuleInfo(opts.Module);
         var gen = _codeGenFactory.Create(insp, opts.Flatten, ns);
         var emitter = _emitterFactory.Create(insp, gen);
+        var outRoot = opts.Output;
+        var outDir = Path.Combine(outRoot, moduleId);
+        Directory.CreateDirectory(outDir);
 
         var targets = new List<(uint typeId, string name)>();
         if (opts.All)
         {
             _log.LogInformation("Enumerating UDTs from {module}", opts.Module);
-            targets.AddRange(insp.EnumerateUdts());
+            try
+            {
+                targets.AddRange(insp.EnumerateUdts());
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "DbgHelp enumeration failed; trying DIA fallback");
+                var dia = _diaFactory.TryCreate(opts.Module, SymbolSession.BuildDefaultSymbolPath());
+                if (dia != null)
+                {
+                    var emitterDia = new DiaEmitter(dia, ns);
+                    int total = 0;
+                    foreach (var name in dia.EnumerateUdts())
+                    {
+                        try
+                        {
+                            total += emitterDia.GenerateWithDependencies(name, outDir, opts.Flatten);
+                        }
+                        catch (Exception genEx)
+                        {
+                            _log.LogWarning(genEx, "Failed generating {name} via DIA", name);
+                        }
+                    }
+                    _log.LogInformation("Generated {count} file(s) into '{output}'", total, outDir);
+                    return 0;
+                }
+                else
+                {
+                    _log.LogError("DIA not available; cannot enumerate UDTs");
+                    return 2;
+                }
+            }
         }
         else
         {
@@ -78,13 +112,13 @@ internal sealed class GenerationRunner : IGenerationRunner
                             _log.LogError("Type not found via DIA: {name}", name);
                             continue;
                         }
-                        var code = ProgramHelpers.GenerateFromDia(name, dia, udt, opts.Flatten);
-                        File.WriteAllText(Path.Combine(opts.Output, ProgramHelpers.Sanitize(name) + ".g.cs"), code);
+                        var code = ProgramHelpers.GenerateFromDia(name, dia, udt, opts.Flatten, ns);
+                        File.WriteAllText(Path.Combine(outDir, ProgramHelpers.Sanitize(name) + ".g.cs"), code);
                     }
                     else
                     {
-                        var emitterDia = new DiaEmitter(dia);
-                        var count = emitterDia.GenerateWithDependencies(name, opts.Output, opts.Flatten);
+                        var emitterDia = new DiaEmitter(dia, ns);
+                        var count = emitterDia.GenerateWithDependencies(name, outDir, opts.Flatten);
                         _log.LogInformation("DIA emitted {count} file(s) for {name}", count, name);
                     }
                     continue;
@@ -98,32 +132,34 @@ internal sealed class GenerationRunner : IGenerationRunner
         {
             try
             {
-                written += emitter.GenerateWithDependencies(typeId, opts.Output, opts.Flatten);
+                written += emitter.GenerateWithDependencies(typeId, outDir, opts.Flatten);
             }
             catch (Exception ex)
             {
                 _log.LogError(ex, "Failed generating {name}", name);
             }
         }
-        _log.LogInformation("Generated {count} file(s) into '{output}'", written, opts.Output);
+        _log.LogInformation("Generated {count} file(s) into '{output}'", written, outDir);
         return 0;
     }
 
-    private static string DeriveNamespaceFromModule(string module)
+    private static (string moduleId, string ns) DeriveModuleInfo(string module)
     {
         var baseName = Path.GetFileNameWithoutExtension(module).ToLowerInvariant();
-        return baseName switch
+        string moduleId = baseName switch
         {
-            "ntoskrnl" or "ntkrnlmp" or "ntkrnlpa" => "Windows.Nt",
-            "ntdll" => "Windows.Ntdll",
-            _ => "Windows"
+            "ntkrnlmp" or "ntkrnlpa" => "ntoskrnl",
+            _ => baseName
         };
+        string ns = $"ntoskrnlib.{moduleId}";
+        return (moduleId, ns);
     }
 
     private sealed class ConfigEntry
     {
         [YamlMember(Alias = "module")] public string Module { get; set; } = string.Empty;
         [YamlMember(Alias = "flatten")] public bool Flatten { get; set; }
+        [YamlMember(Alias = "all")] public bool All { get; set; }
         [YamlMember(Alias = "names")] public List<string> Names { get; set; } = new();
     }
     private sealed class ConfigRoot
@@ -147,18 +183,78 @@ internal sealed class GenerationRunner : IGenerationRunner
             var module = ce.Module.Replace("ntoskrnlib_placeholder.exe", "ntoskrnl.exe");
             using var session = _sessionFactory.Create(module);
             var insp = new TypeInspector(session);
-            var ns = DeriveNamespaceFromModule(module);
+            var (moduleId, ns) = DeriveModuleInfo(module);
             var gen = _codeGenFactory.Create(insp, ce.Flatten, ns);
             var emitter = _emitterFactory.Create(insp, gen);
-            Directory.CreateDirectory(output);
+            var outDir = Path.Combine(output, moduleId);
+            Directory.CreateDirectory(outDir);
+
+            if (ce.All)
+            {
+                try
+                {
+                    foreach (var (typeId, name) in insp.EnumerateUdts())
+                    {
+                        try { total += emitter.GenerateWithDependencies(typeId, outDir, ce.Flatten); }
+                        catch (Exception ex) { _log.LogWarning(ex, "Failed generating {name}", name); }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex, "DbgHelp enumeration failed; trying DIA fallback (config all)");
+                    var dia = _diaFactory.TryCreate(module, SymbolSession.BuildDefaultSymbolPath());
+                    if (dia != null)
+                    {
+                        var emitterDia = new DiaEmitter(dia, ns);
+                        foreach (var name in dia.EnumerateUdts())
+                        {
+                            try { total += emitterDia.GenerateWithDependencies(name, outDir, ce.Flatten); }
+                            catch (Exception genEx) { _log.LogWarning(genEx, "Failed generating {name} via DIA", name); }
+                        }
+                    }
+                    else
+                    {
+                        _log.LogError("DIA not available; cannot enumerate UDTs for module {module}", module);
+                    }
+                }
+                continue;
+            }
+
             foreach (var name in ce.Names)
             {
-                if (!insp.TryGetTypeIdByName(name, out var typeId))
+                if (insp.TryGetTypeIdByName(name, out var typeId))
                 {
-                    _log.LogWarning("Type not found: {name} in {module}", name, module);
+                    total += emitter.GenerateWithDependencies(typeId, outDir, ce.Flatten);
                     continue;
                 }
-                total += emitter.GenerateWithDependencies(typeId, output, ce.Flatten);
+
+                // Fallback to DIA like the direct CLI path
+                _log.LogWarning("Type not found via DbgHelp: {name}; trying DIA...", name);
+                var dia = _diaFactory.TryCreate(module, SymbolSession.BuildDefaultSymbolPath());
+                if (dia == null)
+                {
+                    _log.LogError("DIA not available; cannot resolve {name}", name);
+                    continue;
+                }
+                if (ce.Flatten)
+                {
+                    var udt = dia.FindUdt(name);
+                    if (udt == null)
+                    {
+                        _log.LogError("Type not found via DIA: {name}", name);
+                        continue;
+                    }
+                    var code = ProgramHelpers.GenerateFromDia(name, dia, udt, ce.Flatten, ns);
+                    File.WriteAllText(Path.Combine(outDir, ProgramHelpers.Sanitize(name) + ".g.cs"), code);
+                    total += 1;
+                }
+                else
+                {
+                    var emitterDia = new DiaEmitter(dia, ns);
+                    var count = emitterDia.GenerateWithDependencies(name, outDir, ce.Flatten);
+                    _log.LogInformation("DIA emitted {count} file(s) for {name}", count, name);
+                    total += count;
+                }
             }
         }
         _log.LogInformation("Generated {count} file(s) into '{output}'", total, output);

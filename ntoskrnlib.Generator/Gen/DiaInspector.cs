@@ -85,6 +85,21 @@ internal sealed class DiaInspector : IDisposable
         return (uint)t.length;
     }
 
+    public IEnumerable<string> EnumerateUdts()
+    {
+        _global.findChildren(SymTagEnum.SymTagUDT, null, 0, out IDiaEnumSymbols? udts);
+        if (udts == null) yield break;
+        for (uint i = 0; ; i++)
+        {
+            IDiaSymbol s;
+            try { s = udts.Item(i); }
+            catch { break; }
+            if (s == null) continue;
+            var n = s.name;
+            if (!string.IsNullOrEmpty(n)) yield return n!;
+        }
+    }
+
     public void Dispose()
     {
         if (_global != null) Marshal.ReleaseComObject(_global);

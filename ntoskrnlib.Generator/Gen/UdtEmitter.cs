@@ -5,6 +5,7 @@ using ntoskrnlib.Interop;
 
 namespace ntoskrnlib.Gen;
 
+[System.Runtime.Versioning.SupportedOSPlatform("windows")]
 internal sealed class UdtEmitter
 {
     private readonly TypeInspector _insp;
@@ -29,8 +30,11 @@ internal sealed class UdtEmitter
             var name = _insp.GetTypeName(typeId);
             var code = _gen.GenerateUdt(typeId);
             var fileName = Path.Combine(outputDir, TypeSpec.SanitizeIdentifier(name) + ".g.cs");
-            File.WriteAllText(fileName, code);
-            written++;
+            if (!File.Exists(fileName))
+            {
+                File.WriteAllText(fileName, code);
+                written++;
+            }
 
             if (!flatten)
             {
@@ -47,4 +51,3 @@ internal sealed class UdtEmitter
         return written;
     }
 }
-

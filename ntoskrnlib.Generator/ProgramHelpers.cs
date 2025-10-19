@@ -20,7 +20,7 @@ internal static class ProgramHelpers
     }
 
     [SupportedOSPlatform("windows")]
-    public static string GenerateFromDia(string displayName, DiaInspector dia, Dia2Lib.IDiaSymbol udt, bool flatten)
+    public static string GenerateFromDia(string displayName, DiaInspector dia, Dia2Lib.IDiaSymbol udt, bool flatten, string? @namespace = null)
     {
         var name = TypeSpec.SanitizeIdentifier(displayName.Contains('!') ? displayName.Split('!')[1] : displayName);
         var size = DiaInspector.GetTypeLength(udt);
@@ -159,7 +159,16 @@ internal static class ProgramHelpers
             structDecl = structWithField;
         }
 
-        cu = cu.AddMembers(structDecl);
+        if (!string.IsNullOrWhiteSpace(@namespace))
+        {
+            var ns = SyntaxFactory.NamespaceDeclaration(SyntaxFactory.ParseName(@namespace!));
+            ns = ns.AddMembers(structDecl);
+            cu = cu.AddMembers(ns);
+        }
+        else
+        {
+            cu = cu.AddMembers(structDecl);
+        }
         return cu.NormalizeWhitespace().ToFullString();
     }
 

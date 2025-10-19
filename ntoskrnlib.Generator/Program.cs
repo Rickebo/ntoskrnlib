@@ -7,6 +7,8 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ntoskrnlib.Options;
 using ntoskrnlib.Services;
+using System.CommandLine;
+using System.CommandLine.Invocation;
 
 namespace ntoskrnlib;
 
@@ -15,114 +17,102 @@ internal static class Program
     [SupportedOSPlatform("windows")]
     private static int Main(string[] args)
     {
+        var moduleOpt = new Option<string>(new[] {"--module","-m"})
+        {
+            Arity = ArgumentArity.ZeroOrOne
+        };
+        moduleOpt.Description = "Path to module (DLL/EXE) whose PDB to use.";
+        moduleOpt.SetDefaultValue(GetDefaultNtPath());
+
+        var typesOpt = new Option<string[]>(new[] {"--types","-t"})
+        {
+            Arity = ArgumentArity.ZeroOrMore
+        };
+        typesOpt.Description = "Type names to generate (repeat or comma-separate).";
+
+        var allOpt = new Option<bool>(new[] {"--all","-a"});
+        allOpt.Description = "Generate all UDTs in the module.";
+        var outOpt = new Option<string>(new[] {"--out","-o"})
+        {
+            Arity = ArgumentArity.ExactlyOne
+        };
+        outOpt.Description = "Output directory for .g.cs files.";
+        outOpt.SetDefaultValue(Path.Combine(Environment.CurrentDirectory, "out"));
+
+        var flattenOpt = new Option<bool>("--flatten");
+        flattenOpt.Description = "Flatten nested UDTs into byte[] fields (single-file friendliness).";
+        var depsOpt = new Option<bool>(new[] {"--deps","-d"});
+        depsOpt.Description = "Also emit dependent UDTs (when not using --flatten).";
+        var configOpt = new Option<string?>(new[] {"--config","-c"})
+        {
+            Arity = ArgumentArity.ZeroOrOne
+        };
+        configOpt.Description = "YAML config path (overrides other selectors).";
+
+        var root = new RootCommand("ntoskrnlib symbol-to-C# generator")
+        {
+            moduleOpt, typesOpt, allOpt, outOpt, flattenOpt, depsOpt, configOpt
+        };
+
+        // Parse and execute inline to avoid handler API differences across RCs
+        var parseResult = root.Parse(args);
+
+        string module = parseResult.GetValueForOption(moduleOpt) ?? GetDefaultNtPath();
+        var types = new List<string>();
+        var rawTypes = parseResult.GetValueForOption(typesOpt);
+        if (rawTypes != null)
+        {
+            foreach (var r in rawTypes)
+            {
+                if (string.IsNullOrWhiteSpace(r)) continue;
+                if (r.Contains(',')) types.AddRange(r.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+                else types.Add(r.Trim());
+            }
+        }
+        bool all = parseResult.GetValueForOption(allOpt);
+        string output = parseResult.GetValueForOption(outOpt) ?? Path.Combine(Environment.CurrentDirectory, "out");
+        bool flatten = parseResult.GetValueForOption(flattenOpt);
+        bool deps = parseResult.GetValueForOption(depsOpt);
+        string? configPath = parseResult.GetValueForOption(configOpt);
+
+        if (string.IsNullOrEmpty(configPath) && !all && types.Count == 0)
+        {
+            types.Add("_EPROCESS");
+            flatten = true;
+        }
+
+        var builder = Host.CreateApplicationBuilder();
+        builder.Services.AddLogging(cfg => cfg.AddSimpleConsole(o => o.SingleLine = true));
+        builder.Services.AddSingleton<Abstractions.ISymbolSessionFactory, Services.SymbolSessionFactory>();
+        builder.Services.AddSingleton<Abstractions.ICodeGeneratorFactory, Services.CodeGeneratorFactory>();
+        builder.Services.AddSingleton<Abstractions.IUdtEmitterFactory, Services.UdtEmitterFactory>();
+        builder.Services.AddSingleton<Abstractions.IDiaInspectorFactory, Services.DiaInspectorFactory>();
+        builder.Services.AddSingleton<Services.IGenerationRunner, Services.GenerationRunner>();
+        using var host = builder.Build();
+
+        var runner = host.Services.GetRequiredService<IGenerationRunner>();
+        var opts = new GenerationOptions
+        {
+            Module = module,
+            Types = types,
+            All = all,
+            Output = output,
+            Flatten = flatten,
+            ConfigPath = configPath,
+            Deps = deps,
+        };
         try
         {
-            var (module, types, all, output, flatten, configPath, deps) = ParseArgs(args);
-
-            var builder = Host.CreateApplicationBuilder();
-            builder.Services.AddLogging(cfg => cfg.AddSimpleConsole(o => o.SingleLine = true));
-            builder.Services.AddSingleton<Abstractions.ISymbolSessionFactory, Services.SymbolSessionFactory>();
-            builder.Services.AddSingleton<Abstractions.ICodeGeneratorFactory, Services.CodeGeneratorFactory>();
-            builder.Services.AddSingleton<Abstractions.IUdtEmitterFactory, Services.UdtEmitterFactory>();
-            builder.Services.AddSingleton<Abstractions.IDiaInspectorFactory, Services.DiaInspectorFactory>();
-            builder.Services.AddSingleton<Services.IGenerationRunner, Services.GenerationRunner>();
-            using var host = builder.Build();
-
-            var runner = host.Services.GetRequiredService<IGenerationRunner>();
-            var opts = new GenerationOptions
-            {
-                Module = module,
-                Types = types,
-                All = all,
-                Output = output,
-                Flatten = flatten,
-                ConfigPath = configPath,
-                Deps = deps,
-            };
             return runner.Run(opts);
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine(ex.ToString());
-            Console.Error.WriteLine();
-            PrintUsage();
             return 1;
         }
     }
 
-    private static (string module, List<string> types, bool all, string output, bool flatten, string? configPath, bool deps) ParseArgs(string[] args)
-    {
-        string module = GetDefaultNtPath();
-        var types = new List<string>();
-        bool all = false;
-        string output = Path.Combine(Environment.CurrentDirectory, "out");
-        bool flatten = false;
-        string? config = null;
-        bool deps = false;
-
-        for (int i = 0; i < args.Length; i++)
-        {
-            switch (args[i])
-            {
-                case "--module":
-                case "-m":
-                    module = args[++i];
-                    break;
-                case "--types":
-                case "-t":
-                    types.AddRange(args[++i].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
-                    break;
-                case "--all":
-                case "-a":
-                    all = true;
-                    break;
-                case "--out":
-                case "-o":
-                    output = args[++i];
-                    break;
-                case "--flatten":
-                    flatten = true;
-                    break;
-                case "--deps":
-                case "-d":
-                    deps = true;
-                    break;
-                case "--config":
-                case "-c":
-                    config = args[++i];
-                    break;
-                case "--help":
-                case "-h":
-                    throw new InvalidOperationException("help");
-                default:
-                    throw new ArgumentException($"Unknown arg: {args[i]}");
-            }
-        }
-
-        if (string.IsNullOrEmpty(config) && !all && types.Count == 0)
-        {
-            // Default to _EPROCESS only if nothing specified
-            types.Add("_EPROCESS");
-            flatten = true; // keep it to a single file by default
-        }
-
-        return (module, types, all, output, flatten, config, deps);
-    }
-
-    private static void PrintUsage()
-    {
-        Console.WriteLine("ntoskrnlib symbol-to-C# generator");
-        Console.WriteLine();
-        Console.WriteLine("Usage:");
-        Console.WriteLine("  dotnet run -- -m <modulePath> -t <type1,type2,...> -o <outDir>");
-        Console.WriteLine("  dotnet run -- -m <modulePath> --all -o <outDir>");
-        Console.WriteLine("  dotnet run -- --config config\\types.yml -o ntoskrnlib.Types\\Generated");
-        Console.WriteLine();
-        Console.WriteLine("Examples:");
-        Console.WriteLine("  dotnet run -- -m C\\\\Windows\\\\System32\\\\ntoskrnl.exe -t _EPROCESS --flatten -o gen");
-        Console.WriteLine("  dotnet run -- -m C\\\\Windows\\\\System32\\\\ntdll.dll -t _PEB -o gen");
-        Console.WriteLine("  dotnet run --            (defaults to _EPROCESS with --flatten)");
-    }
+    
 
     private static string GetDefaultNtPath()
     {
