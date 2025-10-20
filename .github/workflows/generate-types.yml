@@ -267,7 +267,7 @@ jobs:
           draft: false
 
       - name: Auto-approve pull request (optional)
-        if: steps.cpr.outputs.pull-request-number && secrets.AUTO_APPROVE_TOKEN != ''
+        if: ${{ steps.cpr.outputs.pull-request-number && secrets.AUTO_APPROVE_TOKEN != '' }}
         uses: hmarr/auto-approve-action@v3
         with:
           pull-request-number: ${{ steps.cpr.outputs.pull-request-number }}
@@ -275,7 +275,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.AUTO_APPROVE_TOKEN }}
 
       - name: Enable auto-merge (optional)
-        if: steps.cpr.outputs.pull-request-number && secrets.AUTO_APPROVE_TOKEN != ''
+        if: ${{ steps.cpr.outputs.pull-request-number && secrets.AUTO_APPROVE_TOKEN != '' }}
         uses: peter-evans/enable-pull-request-automerge@v3
         with:
           token: ${{ secrets.AUTO_APPROVE_TOKEN }}
