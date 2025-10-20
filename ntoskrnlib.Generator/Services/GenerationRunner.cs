@@ -57,13 +57,27 @@ internal sealed class GenerationRunner : IGenerationRunner
         if (opts.All)
         {
             _log.LogInformation("Enumerating UDTs from {module}", opts.Module);
+            bool usedDbgHelp = false;
             try
             {
-                targets.AddRange(insp.EnumerateUdts());
+                var udts = new List<(uint typeId, string name)>(insp.EnumerateUdts());
+                if (udts.Count > 0)
+                {
+                    targets.AddRange(udts);
+                    usedDbgHelp = true;
+                }
+                else
+                {
+                    _log.LogWarning("DbgHelp enumeration returned 0 UDTs; trying DIA fallback");
+                }
             }
             catch (Exception ex)
             {
                 _log.LogWarning(ex, "DbgHelp enumeration failed; trying DIA fallback");
+            }
+
+            if (!usedDbgHelp)
+            {
                 var dia = _diaFactory.TryCreate(opts.Module, SymbolSession.BuildDefaultSymbolPath());
                 if (dia != null)
                 {
@@ -71,23 +85,14 @@ internal sealed class GenerationRunner : IGenerationRunner
                     int total = 0;
                     foreach (var name in dia.EnumerateUdts())
                     {
-                        try
-                        {
-                            total += emitterDia.GenerateWithDependencies(name, outDir, opts.Flatten);
-                        }
-                        catch (Exception genEx)
-                        {
-                            _log.LogWarning(genEx, "Failed generating {name} via DIA", name);
-                        }
+                        try { total += emitterDia.GenerateWithDependencies(name, outDir, opts.Flatten); }
+                        catch (Exception genEx) { _log.LogWarning(genEx, "Failed generating {name} via DIA", name); }
                     }
                     _log.LogInformation("Generated {count} file(s) into '{output}'", total, outDir);
                     return 0;
                 }
-                else
-                {
-                    _log.LogError("DIA not available; cannot enumerate UDTs");
-                    return 2;
-                }
+                _log.LogError("DIA not available; cannot enumerate UDTs");
+                return 2;
             }
         }
         else
@@ -191,17 +196,31 @@ internal sealed class GenerationRunner : IGenerationRunner
 
             if (ce.All)
             {
+                bool usedDbgHelp = false;
                 try
                 {
-                    foreach (var (typeId, name) in insp.EnumerateUdts())
+                    var udts = new List<(uint typeId, string name)>(insp.EnumerateUdts());
+                    if (udts.Count > 0)
                     {
-                        try { total += emitter.GenerateWithDependencies(typeId, outDir, ce.Flatten); }
-                        catch (Exception ex) { _log.LogWarning(ex, "Failed generating {name}", name); }
+                        foreach (var (typeId, name) in udts)
+                        {
+                            try { total += emitter.GenerateWithDependencies(typeId, outDir, ce.Flatten); }
+                            catch (Exception ex) { _log.LogWarning(ex, "Failed generating {name}", name); }
+                        }
+                        usedDbgHelp = true;
+                    }
+                    else
+                    {
+                        _log.LogWarning("DbgHelp enumeration returned 0 UDTs; trying DIA fallback (config all)");
                     }
                 }
                 catch (Exception ex)
                 {
                     _log.LogWarning(ex, "DbgHelp enumeration failed; trying DIA fallback (config all)");
+                }
+
+                if (!usedDbgHelp)
+                {
                     var dia = _diaFactory.TryCreate(module, SymbolSession.BuildDefaultSymbolPath());
                     if (dia != null)
                     {
