@@ -1,7 +1,4 @@
-using System;
-using System.Collections.Generic;
 using System.Text;
-using ntoskrnlib.Structure; // for attribute reference in generated code
 
 namespace ntoskrnlib.Gen;
 

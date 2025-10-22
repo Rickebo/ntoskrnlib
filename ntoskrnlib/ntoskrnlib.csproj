@@ -28,6 +28,11 @@
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
+
+  <ItemGroup>
+    <Folder Include="Dynamic\" />
+  </ItemGroup>
+
   <!-- Auto-generate sources before compilation on Windows -->
   <Target Name="GenerateTypes"
           BeforeTargets="CoreCompile"

@@ -119,17 +119,48 @@ jobs:
           )
           foreach ($p in $candidates) { if (Test-Path $p) { $p | Out-File -Append -FilePath $env:GITHUB_PATH; Write-Host "Added to PATH: $p" } }
 
-      - name: Ensure DIA is registered (best-effort)
+      - name: Ensure DIA (msdia140.dll) is present and registered
         shell: pwsh
         run: |
-          $candidates = @(
-            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\Enterprise\DIA SDK\bin\amd64\msdia140.dll",
-            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\Professional\DIA SDK\bin\amd64\msdia140.dll",
-            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\Community\DIA SDK\bin\amd64\msdia140.dll",
-            "$Env:ProgramFiles\Microsoft Visual Studio\2022\BuildTools\DIA SDK\bin\amd64\msdia140.dll"
+          function Register-Dia($dlls) {
+            foreach ($dll in $dlls) {
+              try {
+                if (Test-Path $dll) {
+                  Start-Process regsvr32.exe -ArgumentList '/s', $dll -Wait -NoNewWindow
+                  Write-Host "Registered DIA: $dll"
+                }
+              } catch { Write-Warning "Failed to register $dll: $_" }
+            }
+          }
+
+          $search = @(
+            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\*\DIA SDK\bin\amd64\msdia140.dll",
+            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\*\Common7\IDE\msdia140.dll",
+            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\*\Common7\Packages\Debugger\msdia140.dll",
+            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\*\Team Tools\Dynamic Code Coverage Tools\amd64\msdia140.dll",
+            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2019\*\DIA SDK\bin\amd64\msdia140.dll",
+            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2019\*\Common7\IDE\msdia140.dll",
+            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2019\*\Common7\Packages\Debugger\msdia140.dll"
           )
-          foreach ($dll in $candidates) {
-            if (Test-Path $dll) { Start-Process regsvr32.exe -ArgumentList '/s', $dll -Wait -NoNewWindow; Write-Host "Registered: $dll"; break }
+          $found = @()
+          foreach ($pat in $search) { $found += Get-ChildItem -Path $pat -ErrorAction SilentlyContinue }
+
+          if (-not $found) {
+            Write-Warning "msdia140.dll not found; installing Visual Studio Build Tools (VCTools workload) to obtain DIA SDK..."
+            $bt = Join-Path $env:RUNNER_TEMP 'vs_BuildTools.exe'
+            Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vs_BuildTools.exe' -OutFile $bt -UseBasicParsing
+            & $bt --quiet --wait --norestart --nocache \
+              --add Microsoft.VisualStudio.Workload.VCTools \
+              --add Microsoft.VisualStudio.Component.VC.140 \
+              --includeRecommended
+            # Re-scan after install
+            foreach ($pat in $search) { $found += Get-ChildItem -Path $pat -ErrorAction SilentlyContinue }
+          }
+
+          if ($found) {
+            Register-Dia ($found | Select-Object -ExpandProperty FullName -Unique)
+          } else {
+            Write-Error 'Failed to locate msdia140.dll even after attempting Build Tools install.'
           }
 
       - name: Build library (triggers generation)
