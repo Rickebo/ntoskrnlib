@@ -10,11 +10,17 @@ internal sealed class UdtEmitter
 {
     private readonly TypeInspector _insp;
     private readonly CodeGenerator _gen;
+    private readonly DynamicWrapperGenerator? _dyn;
+    private readonly string? _ns;
+    private readonly string? _moduleSym;
 
-    public UdtEmitter(TypeInspector insp, CodeGenerator gen)
+    public UdtEmitter(TypeInspector insp, CodeGenerator gen, DynamicWrapperGenerator? dyn = null, string? @namespace = null, string? moduleSymbolPrefix = null)
     {
         _insp = insp;
         _gen = gen;
+        _dyn = dyn;
+        _ns = @namespace;
+        _moduleSym = moduleSymbolPrefix;
     }
 
     public int GenerateWithDependencies(uint rootTypeId, string outputDir, bool flatten)
@@ -34,6 +40,18 @@ internal sealed class UdtEmitter
             {
                 File.WriteAllText(fileName, code);
                 written++;
+            }
+
+            if (_dyn != null && _ns != null && _moduleSym != null)
+            {
+                var dcode = _dyn.Generate(typeId, _ns, _moduleSym);
+                var ddir = Path.Combine(outputDir, "Dynamic");
+                Directory.CreateDirectory(ddir);
+                var dfile = Path.Combine(ddir, TypeSpec.SanitizeIdentifier(name) + ".dynamic.g.cs");
+                if (!File.Exists(dfile))
+                {
+                    File.WriteAllText(dfile, dcode);
+                }
             }
 
             if (!flatten)

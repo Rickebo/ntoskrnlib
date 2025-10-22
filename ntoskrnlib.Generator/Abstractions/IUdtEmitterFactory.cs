@@ -4,6 +4,5 @@ namespace ntoskrnlib.Abstractions;
 
 internal interface IUdtEmitterFactory
 {
-    UdtEmitter Create(TypeInspector inspector, CodeGenerator generator);
+    UdtEmitter Create(TypeInspector inspector, CodeGenerator generator, DynamicWrapperGenerator? dynamicGenerator, string? @namespace, string? moduleSymbolPrefix);
 }
-

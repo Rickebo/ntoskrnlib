@@ -12,4 +12,5 @@ internal sealed class GenerationOptions
     public string? ConfigPath { get; init; }
     public bool Deps { get; init; }
     public string? VersionLabel { get; init; }
+    public bool EmitDynamic { get; init; } = true;
 }

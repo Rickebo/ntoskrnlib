@@ -55,9 +55,11 @@ internal static class Program
         };
         winverOpt.Description = "Windows version label (e.g. Win25H2). Used for output subdir and namespace prefix.";
 
+        var dynOpt = new Option<bool>(new[] {"--emit-dynamic"}, () => true, "Also emit DynamicStructure wrappers.");
+
         var root = new RootCommand("ntoskrnlib symbol-to-C# generator")
         {
-            moduleOpt, typesOpt, allOpt, outOpt, flattenOpt, depsOpt, configOpt, winverOpt
+            moduleOpt, typesOpt, allOpt, outOpt, flattenOpt, depsOpt, configOpt, winverOpt, dynOpt
         };
 
         // Parse and execute inline to avoid handler API differences across RCs
@@ -82,6 +84,7 @@ internal static class Program
         string? configPath = parseResult.GetValueForOption(configOpt);
         var verArg = parseResult.GetValueForOption(winverOpt);
         string? versionLabel = string.IsNullOrWhiteSpace(verArg) ? null : verArg;
+        bool emitDynamic = parseResult.GetValueForOption(dynOpt);
 
         if (string.IsNullOrEmpty(configPath) && !all && types.Count == 0)
         {
@@ -109,6 +112,7 @@ internal static class Program
             ConfigPath = configPath,
             Deps = deps,
             VersionLabel = versionLabel,
+            EmitDynamic = emitDynamic,
         };
         try
         {

@@ -52,7 +52,9 @@ internal sealed class GenerationRunner : IGenerationRunner
             versionId = DetectWindowsVersionLabel();
         var (moduleId, ns) = DeriveModuleInfo(opts.Module, versionId);
         var gen = _codeGenFactory.Create(insp, opts.Flatten, ns);
-        var emitter = _emitterFactory.Create(insp, gen);
+        DynamicWrapperGenerator? dyn = opts.EmitDynamic ? new DynamicWrapperGenerator(insp) : null;
+        string moduleSym = moduleId; // simple prefix; DbgHelp often aliases 'nt' but this is for metadata only
+        var emitter = _emitterFactory.Create(insp, gen, dyn, ns, moduleSym);
         var outRoot = opts.Output;
         var versionDir = Path.Combine(outRoot, versionId);
         // Clean current version directory to avoid stale files without touching other versions
@@ -236,7 +238,9 @@ internal sealed class GenerationRunner : IGenerationRunner
             var insp = new TypeInspector(session);
             var (moduleId, ns) = DeriveModuleInfo(module, versionId);
             var gen = _codeGenFactory.Create(insp, ce.Flatten, ns);
-            var emitter = _emitterFactory.Create(insp, gen);
+            DynamicWrapperGenerator? dyn = new DynamicWrapperGenerator(insp);
+            string moduleSym = moduleId;
+            var emitter = _emitterFactory.Create(insp, gen, dyn, ns, moduleSym);
             var outDir = Path.Combine(output, versionId, moduleId);
             Directory.CreateDirectory(outDir);
 
