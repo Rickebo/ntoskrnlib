@@ -18,6 +18,11 @@
     <GenerateTypesDuringBuild>true</GenerateTypesDuringBuild>
   </PropertyGroup>
 
+  <!-- Always include any pre-generated files in the build -->
+  <ItemGroup>
+    <Compile Include="Generated\**\*.g.cs" />
+  </ItemGroup>
+
 
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="/" />
@@ -35,9 +40,5 @@
     <Message Text="[ntoskrnlib] Generating sources into $(MSBuildProjectDirectory)\Generated" Importance="High" />
     <MakeDir Directories="$(MSBuildProjectDirectory)\Generated" />
     <Exec Command='dotnet run --project &quot;$(MSBuildThisFileDirectory)..\ntoskrnlib.Generator\ntoskrnlib.Generator.csproj&quot; -- --config &quot;$(MSBuildThisFileDirectory)..\config\types.yml&quot; -o &quot;$(MSBuildProjectDirectory)\Generated&quot;' />
-    <!-- Ensure generated files are added to this build after generation completes -->
-    <ItemGroup>
-      <Compile Include="$(MSBuildProjectDirectory)\Generated\**\*.g.cs" />
-    </ItemGroup>
   </Target>
 </Project>

@@ -119,9 +119,6 @@ jobs:
           )
           foreach ($p in $candidates) { if (Test-Path $p) { $p | Out-File -Append -FilePath $env:GITHUB_PATH; Write-Host "Added to PATH: $p" } }
 
-      - name: Build generator
-        run: dotnet build ntoskrnlib.Generator\ntoskrnlib.Generator.csproj -c Release
-
       - name: Ensure DIA is registered (best-effort)
         shell: pwsh
         run: |
@@ -135,29 +132,21 @@ jobs:
             if (Test-Path $dll) { Start-Process regsvr32.exe -ArgumentList '/s', $dll -Wait -NoNewWindow; Write-Host "Registered: $dll"; break }
           }
 
-      - name: Generate types
-        shell: pwsh
-        env:
-          _NT_SYMBOL_PATH: srv*${{ runner.temp }}\symbols*https://msdl.microsoft.com/download/symbols
-        run: |
-          New-Item -ItemType Directory -Force -Path ntoskrnlib\Generated | Out-Null
-          (Get-Content config\types.yml) -replace 'ntoskrnlib_placeholder.exe','ntoskrnl.exe' | Set-Content config\types.yml
-          dotnet run --project ntoskrnlib.Generator\ntoskrnlib.Generator.csproj -- --config config\types.yml -o ntoskrnlib\Generated
+      - name: Build library (triggers generation)
+        run: dotnet build ntoskrnlib\ntoskrnlib.csproj -c Release
 
-      - name: Count generated files
+      - name: Verify generated files exist
         shell: pwsh
         run: |
           $files = Get-ChildItem ntoskrnlib\\Generated -Recurse -Filter *.g.cs -ErrorAction SilentlyContinue
           $count = @($files).Count
           Write-Host "Generated files count: $count"
-
-      - name: Build library (skip in-build generation)
-        run: dotnet build ntoskrnlib\ntoskrnlib.csproj -c Release /p:SkipGenerateTypes=true
+          if ($count -eq 0) { Write-Error 'No generated files found in ntoskrnlib\\Generated. Failing build.'; exit 1 }
       - name: Pack with base version
         shell: pwsh
         run: |
           $verBase = '${{ needs.version.outputs.base }}'
-          dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$verBase /p:SkipGenerateTypes=true
+          dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$verBase
 
       - name: Compare content and finalize version
         id: out
@@ -196,7 +185,7 @@ jobs:
 
           if ($final -ne $base) {
             Remove-Item artifacts\*.nupkg -Force -ErrorAction SilentlyContinue
-            dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$final /p:SkipGenerateTypes=true
+            dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$final
           }
 
           $idx = Invoke-RestMethod -UseBasicParsing -Uri ("https://api.nuget.org/v3-flatcontainer/$pkg/index.json")
