@@ -40,17 +40,18 @@ internal sealed class GenerationRunner : IGenerationRunner
     public int Run(GenerationOptions opts)
     {
         if (!string.IsNullOrEmpty(opts.ConfigPath))
-            return RunFromConfig(opts.ConfigPath!, opts.Output);
+            return RunFromConfig(opts.ConfigPath!, opts.Output, opts.VersionLabel);
 
         Directory.CreateDirectory(opts.Output);
 
         using var session = _sessionFactory.Create(opts.Module);
         var insp = new TypeInspector(session);
-        var (moduleId, ns) = DeriveModuleInfo(opts.Module);
+        var versionId = NormalizeVersionLabel(opts.VersionLabel);
+        var (moduleId, ns) = DeriveModuleInfo(opts.Module, versionId);
         var gen = _codeGenFactory.Create(insp, opts.Flatten, ns);
         var emitter = _emitterFactory.Create(insp, gen);
         var outRoot = opts.Output;
-        var outDir = Path.Combine(outRoot, moduleId);
+        var outDir = Path.Combine(outRoot, versionId, moduleId);
         Directory.CreateDirectory(outDir);
 
         var targets = new List<(uint typeId, string name)>();
@@ -148,7 +149,7 @@ internal sealed class GenerationRunner : IGenerationRunner
         return 0;
     }
 
-    private static (string moduleId, string ns) DeriveModuleInfo(string module)
+    private static (string moduleId, string ns) DeriveModuleInfo(string module, string versionId)
     {
         var baseName = Path.GetFileNameWithoutExtension(module).ToLowerInvariant();
         string moduleId = baseName switch
@@ -156,7 +157,9 @@ internal sealed class GenerationRunner : IGenerationRunner
             "ntkrnlmp" or "ntkrnlpa" => "ntoskrnl",
             _ => baseName
         };
-        string ns = $"ntoskrnlib.{moduleId}";
+        string ns = string.IsNullOrWhiteSpace(versionId)
+            ? $"ntoskrnlib.{moduleId}"
+            : $"ntoskrnlib.{versionId}.{moduleId}";
         return (moduleId, ns);
     }
 
@@ -170,28 +173,61 @@ internal sealed class GenerationRunner : IGenerationRunner
     private sealed class ConfigRoot
     {
         [YamlMember(Alias = "types")] public List<ConfigEntry> Types { get; set; } = new();
+        [YamlMember(Alias = "version_label")] public string? VersionLabel { get; set; }
+        [YamlMember(Alias = "versions")] public List<ConfigVersion> Versions { get; set; } = new();
     }
 
-    private int RunFromConfig(string configPath, string output)
+    private sealed class ConfigVersion
+    {
+        [YamlMember(Alias = "label")] public string Label { get; set; } = string.Empty;
+        [YamlMember(Alias = "types")] public List<ConfigEntry> Types { get; set; } = new();
+    }
+
+    private int RunFromConfig(string configPath, string output, string? cliVersionLabel)
     {
         var yaml = File.ReadAllText(configPath);
         var y = new DeserializerBuilder().IgnoreUnmatchedProperties().Build();
         var root = y.Deserialize<ConfigRoot>(yaml);
-        if (root == null || root.Types == null)
+        if (root == null)
         {
             _log.LogError("Invalid config: 'types' not found");
             return 2;
         }
         int total = 0;
-        foreach (var ce in root.Types)
+
+        // If multi-version is provided, iterate each and generate into its own subdir/namespace
+        if (root.Versions != null && root.Versions.Count > 0)
+        {
+            foreach (var v in root.Versions)
+            {
+                var versionId = NormalizeVersionLabel(v.Label);
+                total += RunOneConfigTypesSet(v.Types, output, versionId);
+            }
+            _log.LogInformation("Generated {count} file(s) into '{output}'", total, output);
+            return 0;
+        }
+
+        // Fallback: single-version root list, possibly with a version label
+        var singleVersionId = NormalizeVersionLabel(cliVersionLabel ?? root.VersionLabel);
+        total += RunOneConfigTypesSet(root.Types, output, singleVersionId);
+        _log.LogInformation("Generated {count} file(s) into '{output}'", total, output);
+        return 0;
+    }
+
+    private int RunOneConfigTypesSet(List<ConfigEntry> entries, string output, string versionId)
+    {
+        if (entries == null)
+            return 0;
+        int total = 0;
+        foreach (var ce in entries)
         {
             var module = ce.Module.Replace("ntoskrnlib_placeholder.exe", "ntoskrnl.exe");
             using var session = _sessionFactory.Create(module);
             var insp = new TypeInspector(session);
-            var (moduleId, ns) = DeriveModuleInfo(module);
+            var (moduleId, ns) = DeriveModuleInfo(module, versionId);
             var gen = _codeGenFactory.Create(insp, ce.Flatten, ns);
             var emitter = _emitterFactory.Create(insp, gen);
-            var outDir = Path.Combine(output, moduleId);
+            var outDir = Path.Combine(output, versionId, moduleId);
             Directory.CreateDirectory(outDir);
 
             if (ce.All)
@@ -276,7 +312,43 @@ internal sealed class GenerationRunner : IGenerationRunner
                 }
             }
         }
-        _log.LogInformation("Generated {count} file(s) into '{output}'", total, output);
-        return 0;
+        return total;
+    }
+
+    private static string NormalizeVersionLabel(string? label)
+    {
+        if (string.IsNullOrWhiteSpace(label)) return string.Empty;
+        var s = label.Trim();
+        // Prefer patterns like 24H2/25H2
+        try
+        {
+            var idx = s.IndexOf("H", StringComparison.OrdinalIgnoreCase);
+            if (idx > 0 && idx + 1 < s.Length)
+            {
+                // Capture preceding two digits and H[12]
+                var start = Math.Max(0, idx - 2);
+                var maybe = s.Substring(start, Math.Min(3, s.Length - start));
+                // e.g., "25H", extend one more char if possible
+                if (maybe.Length == 3 && start + 3 < s.Length)
+                    maybe += s[start + 3];
+                if (maybe.Length >= 3 && char.IsDigit(maybe[0]) && char.IsDigit(maybe[1]) && (maybe[2] == 'H' || maybe[2] == 'h'))
+                {
+                    var h2 = (maybe.Length >= 4 && (maybe[3] == '1' || maybe[3] == '2')) ? maybe[3].ToString() : "";
+                    return "Win" + char.ToUpperInvariant(maybe[0]) + char.ToUpperInvariant(maybe[1]) + "H" + (string.IsNullOrEmpty(h2) ? "" : h2);
+                }
+            }
+        }
+        catch { /* best-effort */ }
+
+        // Generic sanitize: remove non-alnum and ensure starts with Win
+        var chars = new System.Text.StringBuilder();
+        foreach (var ch in s)
+        {
+            if (char.IsLetterOrDigit(ch)) chars.Append(ch);
+        }
+        var core = chars.ToString();
+        if (core.StartsWith("Win", StringComparison.OrdinalIgnoreCase))
+            return core;
+        return "Win" + core;
     }
 }

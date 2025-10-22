@@ -11,5 +11,5 @@ internal sealed class GenerationOptions
     public bool Flatten { get; init; }
     public string? ConfigPath { get; init; }
     public bool Deps { get; init; }
+    public string? VersionLabel { get; init; }
 }
-

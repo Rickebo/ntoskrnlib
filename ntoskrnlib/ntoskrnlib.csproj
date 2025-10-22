@@ -16,6 +16,7 @@
     <AssemblyName>ntoskrnlib</AssemblyName>
     <RootNamespace>ntoskrnlib</RootNamespace>
     <GenerateTypesDuringBuild>true</GenerateTypesDuringBuild>
+    <WindowsVersionLabel Condition=" '$(WindowsVersionLabel)' == '' ">WinCurrent</WindowsVersionLabel>
   </PropertyGroup>
 
   <!-- Always include any pre-generated files in the build -->
@@ -30,7 +31,8 @@
 
   <!-- Clean just before we (re)generate, to avoid timing windows between clean/compile -->
   <Target Name="CleanGenerated" BeforeTargets="GenerateTypes">
-    <RemoveDir Directories="$(MSBuildProjectDirectory)\Generated" />
+    <Message Text="[ntoskrnlib] Cleaning only current version directory: $(MSBuildProjectDirectory)\Generated\$(WindowsVersionLabel)" Importance="High" />
+    <RemoveDir Directories="$(MSBuildProjectDirectory)\Generated\$(WindowsVersionLabel)" />
   </Target>
 
   <!-- Auto-generate sources before compilation on Windows -->
@@ -39,6 +41,6 @@
           Condition=" '$(OS)' == 'Windows_NT' and '$(GenerateTypesDuringBuild)' == 'true' and '$(SkipGenerateTypes)' != 'true' ">
     <Message Text="[ntoskrnlib] Generating sources into $(MSBuildProjectDirectory)\Generated" Importance="High" />
     <MakeDir Directories="$(MSBuildProjectDirectory)\Generated" />
-    <Exec Command='dotnet run --project &quot;$(MSBuildThisFileDirectory)..\ntoskrnlib.Generator\ntoskrnlib.Generator.csproj&quot; -- --config &quot;$(MSBuildThisFileDirectory)..\config\types.yml&quot; -o &quot;$(MSBuildProjectDirectory)\Generated&quot;' />
+    <Exec Command='dotnet run --project &quot;$(MSBuildThisFileDirectory)..\ntoskrnlib.Generator\ntoskrnlib.Generator.csproj&quot; -- --config &quot;$(MSBuildThisFileDirectory)..\config\types.yml&quot; -o &quot;$(MSBuildProjectDirectory)\Generated&quot; -w &quot;$(WindowsVersionLabel)&quot;' />
   </Target>
 </Project>

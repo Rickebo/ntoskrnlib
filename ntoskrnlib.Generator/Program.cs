@@ -49,9 +49,15 @@ internal static class Program
         };
         configOpt.Description = "YAML config path (overrides other selectors).";
 
+        var winverOpt = new Option<string?>(new[] {"--winver","-w"})
+        {
+            Arity = ArgumentArity.ZeroOrOne
+        };
+        winverOpt.Description = "Windows version label (e.g. Win25H2). Used for output subdir and namespace prefix.";
+
         var root = new RootCommand("ntoskrnlib symbol-to-C# generator")
         {
-            moduleOpt, typesOpt, allOpt, outOpt, flattenOpt, depsOpt, configOpt
+            moduleOpt, typesOpt, allOpt, outOpt, flattenOpt, depsOpt, configOpt, winverOpt
         };
 
         // Parse and execute inline to avoid handler API differences across RCs
@@ -74,6 +80,7 @@ internal static class Program
         bool flatten = parseResult.GetValueForOption(flattenOpt);
         bool deps = parseResult.GetValueForOption(depsOpt);
         string? configPath = parseResult.GetValueForOption(configOpt);
+        string? versionLabel = parseResult.GetValueForOption(winverOpt);
 
         if (string.IsNullOrEmpty(configPath) && !all && types.Count == 0)
         {
@@ -100,6 +107,7 @@ internal static class Program
             Flatten = flatten,
             ConfigPath = configPath,
             Deps = deps,
+            VersionLabel = versionLabel,
         };
         try
         {

@@ -133,12 +133,14 @@ jobs:
           }
 
       - name: Build library (triggers generation)
-        run: dotnet build ntoskrnlib\ntoskrnlib.csproj -c Release
+        run: dotnet build ntoskrnlib\ntoskrnlib.csproj -c Release /p:WindowsVersionLabel=${{ env.WINVER_LABEL }}
 
       - name: Verify generated files exist
         shell: pwsh
         run: |
-          $files = Get-ChildItem ntoskrnlib\\Generated -Recurse -Filter *.g.cs -ErrorAction SilentlyContinue
+          $root = 'ntoskrnlib\\Generated'
+          $base = if ('${{ env.WINVER_LABEL }}') { Join-Path $root '${{ env.WINVER_LABEL }}' } else { $root }
+          $files = Get-ChildItem $base -Recurse -Filter *.g.cs -ErrorAction SilentlyContinue
           $count = @($files).Count
           Write-Host "Generated files count: $count"
           if ($count -eq 0) { Write-Error 'No generated files found in ntoskrnlib\\Generated. Failing build.'; exit 1 }
@@ -146,7 +148,7 @@ jobs:
         shell: pwsh
         run: |
           $verBase = '${{ needs.version.outputs.base }}'
-          dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$verBase
+          dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$verBase /p:WindowsVersionLabel=${{ env.WINVER_LABEL }}
 
       - name: Compare content and finalize version
         id: out
@@ -185,7 +187,7 @@ jobs:
 
           if ($final -ne $base) {
             Remove-Item artifacts\*.nupkg -Force -ErrorAction SilentlyContinue
-            dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$final
+            dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$final /p:WindowsVersionLabel=${{ env.WINVER_LABEL }}
           }
 
           $idx = Invoke-RestMethod -UseBasicParsing -Uri ("https://api.nuget.org/v3-flatcontainer/$pkg/index.json")
@@ -277,6 +279,7 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
+
 
       - name: Publish to NuGet
         id: publish_nuget
