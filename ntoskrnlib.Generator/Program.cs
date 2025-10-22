@@ -80,7 +80,8 @@ internal static class Program
         bool flatten = parseResult.GetValueForOption(flattenOpt);
         bool deps = parseResult.GetValueForOption(depsOpt);
         string? configPath = parseResult.GetValueForOption(configOpt);
-        string? versionLabel = parseResult.GetValueForOption(winverOpt);
+        var verArg = parseResult.GetValueForOption(winverOpt);
+        string? versionLabel = string.IsNullOrWhiteSpace(verArg) ? null : verArg;
 
         if (string.IsNullOrEmpty(configPath) && !all && types.Count == 0)
         {

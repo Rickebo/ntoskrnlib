@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using Microsoft.Extensions.Logging;
+using Microsoft.Win32;
 using ntoskrnlib.Abstractions;
 using ntoskrnlib.Gen;
 using ntoskrnlib.Options;
@@ -47,11 +48,16 @@ internal sealed class GenerationRunner : IGenerationRunner
         using var session = _sessionFactory.Create(opts.Module);
         var insp = new TypeInspector(session);
         var versionId = NormalizeVersionLabel(opts.VersionLabel);
+        if (string.IsNullOrWhiteSpace(versionId))
+            versionId = DetectWindowsVersionLabel();
         var (moduleId, ns) = DeriveModuleInfo(opts.Module, versionId);
         var gen = _codeGenFactory.Create(insp, opts.Flatten, ns);
         var emitter = _emitterFactory.Create(insp, gen);
         var outRoot = opts.Output;
-        var outDir = Path.Combine(outRoot, versionId, moduleId);
+        var versionDir = Path.Combine(outRoot, versionId);
+        // Clean current version directory to avoid stale files without touching other versions
+        TryCleanDirectory(versionDir);
+        var outDir = Path.Combine(versionDir, moduleId);
         Directory.CreateDirectory(outDir);
 
         var targets = new List<(uint typeId, string name)>();
@@ -209,6 +215,10 @@ internal sealed class GenerationRunner : IGenerationRunner
 
         // Fallback: single-version root list, possibly with a version label
         var singleVersionId = NormalizeVersionLabel(cliVersionLabel ?? root.VersionLabel);
+        if (string.IsNullOrWhiteSpace(singleVersionId))
+            singleVersionId = DetectWindowsVersionLabel();
+        // Clean per-version root once before generating all entries for this version
+        TryCleanDirectory(Path.Combine(output, singleVersionId));
         total += RunOneConfigTypesSet(root.Types, output, singleVersionId);
         _log.LogInformation("Generated {count} file(s) into '{output}'", total, output);
         return 0;
@@ -350,5 +360,48 @@ internal sealed class GenerationRunner : IGenerationRunner
         if (core.StartsWith("Win", StringComparison.OrdinalIgnoreCase))
             return core;
         return "Win" + core;
+    }
+
+    private static string DetectWindowsVersionLabel()
+    {
+        try
+        {
+            using var cv = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+            if (cv != null)
+            {
+                var displayVersion = cv.GetValue("DisplayVersion") as string;
+                if (!string.IsNullOrWhiteSpace(displayVersion))
+                {
+                    var norm = NormalizeVersionLabel("Win" + displayVersion);
+                    if (!string.IsNullOrWhiteSpace(norm)) return norm;
+                }
+                var releaseId = cv.GetValue("ReleaseId") as string;
+                if (!string.IsNullOrWhiteSpace(releaseId))
+                {
+                    var norm = NormalizeVersionLabel("Win" + releaseId);
+                    if (!string.IsNullOrWhiteSpace(norm)) return norm;
+                }
+                var build = (cv.GetValue("CurrentBuild") as string) ?? (cv.GetValue("CurrentBuildNumber") as string) ?? string.Empty;
+                var ubrObj = cv.GetValue("UBR");
+                var ubr = ubrObj != null ? Convert.ToString(ubrObj) : string.Empty;
+                if (!string.IsNullOrWhiteSpace(build))
+                {
+                    var core = string.IsNullOrWhiteSpace(ubr) ? build : ($"{build}.{ubr}");
+                    return NormalizeVersionLabel("WinBuild" + core);
+                }
+            }
+        }
+        catch { /* best-effort */ }
+        return "WinCurrent";
+    }
+
+    private static void TryCleanDirectory(string dir)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(dir)) return;
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        }
+        catch { /* non-fatal */ }
     }
 }

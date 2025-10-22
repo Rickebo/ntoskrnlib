@@ -16,7 +16,6 @@
     <AssemblyName>ntoskrnlib</AssemblyName>
     <RootNamespace>ntoskrnlib</RootNamespace>
     <GenerateTypesDuringBuild>true</GenerateTypesDuringBuild>
-    <WindowsVersionLabel Condition=" '$(WindowsVersionLabel)' == '' ">WinCurrent</WindowsVersionLabel>
   </PropertyGroup>
 
   <!-- Always include any pre-generated files in the build -->
@@ -28,12 +27,6 @@
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
-
-  <!-- Clean just before we (re)generate, to avoid timing windows between clean/compile -->
-  <Target Name="CleanGenerated" BeforeTargets="GenerateTypes">
-    <Message Text="[ntoskrnlib] Cleaning only current version directory: $(MSBuildProjectDirectory)\Generated\$(WindowsVersionLabel)" Importance="High" />
-    <RemoveDir Directories="$(MSBuildProjectDirectory)\Generated\$(WindowsVersionLabel)" />
-  </Target>
 
   <!-- Auto-generate sources before compilation on Windows -->
   <Target Name="GenerateTypes"
