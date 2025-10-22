@@ -95,6 +95,9 @@ namespace ntoskrnlib.Structure
                 return;
 
             var type = typeof(T);
+            // Enforce class annotation for analysis/clarity
+            if (type.GetCustomAttribute<DynamicStructureAttribute>() == null)
+                throw new StructureInitializationException($"Type {type.FullName} must be annotated with [DynamicStructure].");
             var constructor = constructorFunction ?? FindConstructor<T>();
 
             if (constructor == null)
@@ -122,6 +125,37 @@ namespace ntoskrnlib.Structure
                             "Could not resolve offsets of property " + property.Name + " from " + type + ".");
 
                 info.OffsetDictionary.Add(property.Name, offsets);
+            }
+
+            SetInfo<T>(info);
+        }
+
+        // Zero-reflection registration: caller supplies the offset map explicitly
+        public static void Register<T>(Func<IMemorySource, MemoryPointer, T> constructorFunction,
+                                       IDictionary<string, ulong[]> offsets)
+            where T : DynamicStructure
+        {
+            if (GetInfo<T>() != null)
+                return;
+
+            var type = typeof(T);
+            if (type.GetCustomAttribute<DynamicStructureAttribute>() == null)
+                throw new StructureInitializationException($"Type {type.FullName} must be annotated with [DynamicStructure].");
+            if (constructorFunction == null)
+                throw new ArgumentNullException(nameof(constructorFunction));
+            if (offsets == null)
+                throw new ArgumentNullException(nameof(offsets));
+
+            var info = new DynamicStructureInfo(typeof(T))
+            {
+                Constructor = constructorFunction
+            };
+
+            foreach (var kv in offsets)
+            {
+                if (kv.Value == null || kv.Value.Length == 0)
+                    throw new StructureInitializationException($"Offset list for '{kv.Key}' in {type.FullName} is null or empty.");
+                info.OffsetDictionary[kv.Key] = kv.Value;
             }
 
             SetInfo<T>(info);

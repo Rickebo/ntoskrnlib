@@ -2,7 +2,7 @@
 
 namespace ntoskrnlib.Structure
 {
-    [AttributeUsage(AttributeTargets.Property, Inherited = true)]
+    [AttributeUsage(AttributeTargets.Class, Inherited = true, AllowMultiple = false)]
     public class DynamicStructureAttribute : Attribute
     {
         public string BackingSymbolName { get; }

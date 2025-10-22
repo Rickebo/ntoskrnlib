@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 
 namespace ntoskrnlib.Structure
 {
@@ -17,5 +18,9 @@ namespace ntoskrnlib.Structure
         // Convenience registration forwarder (optional to use from tests/helpers)
         public static void Register<T>(Func<IMemorySource, MemoryPointer, T> ctor)
             where T : DynamicStructure => DynamicStructure.Register(ctor);
+
+        public static void Register<T>(Func<IMemorySource, MemoryPointer, T> ctor,
+                                       IDictionary<string, ulong[]> offsets)
+            where T : DynamicStructure => DynamicStructure.Register(ctor, offsets);
     }
 }
