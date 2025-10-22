@@ -33,7 +33,7 @@ namespace ntoskrnlib.Structure
             _lastType = typeof(T);
             _lastTypeSize = size;
 
-            return ReadHere<T>(index * size);
+            return ReadHere<T>((ulong)(index * (long)size));
         }
 
         public T[] GetRange<T>(int length)

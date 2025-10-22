@@ -9,6 +9,12 @@ namespace ntoskrnlib.Structure
         [FieldOffset(0x0)]
         public ulong Value;
 
+        // Constructors for common value types
+        public MemoryPointer(ulong value) { Value = value; }
+        public MemoryPointer(long value) { Value = unchecked((ulong)value); }
+        public MemoryPointer(IntPtr value) { Value = unchecked((ulong)value.ToInt64()); }
+        public MemoryPointer(UIntPtr value) { Value = value.ToUInt64(); }
+
         public bool IsValid() => Value != 0 && Value != ulong.MaxValue;
 
         // Addition/subtraction with unsigned offsets
@@ -48,7 +54,13 @@ namespace ntoskrnlib.Structure
         public static long operator -(MemoryPointer a, MemoryPointer b) => unchecked((long)(a.Value - b.Value));
 
         public static implicit operator ulong(MemoryPointer p) => p.Value;
-        public static explicit operator MemoryPointer(ulong v) => new MemoryPointer { Value = v };
+        public static explicit operator MemoryPointer(ulong v) => new MemoryPointer(v);
+        public static explicit operator MemoryPointer(long v) => new MemoryPointer(v);
+        public static explicit operator MemoryPointer(IntPtr v) => new MemoryPointer(v);
+        public static explicit operator MemoryPointer(UIntPtr v) => new MemoryPointer(v);
+
+        public static explicit operator IntPtr(MemoryPointer p) => new IntPtr(unchecked((long)p.Value));
+        public static explicit operator UIntPtr(MemoryPointer p) => new UIntPtr(p.Value);
 
         public override string ToString() => $"0x{Value:X}";
 
@@ -74,5 +86,9 @@ namespace ntoskrnlib.Structure
         public MemoryPointer Subtract(long offset) => this - offset;
         public MemoryPointer Subtract(int offset) => this - offset;
         public ulong Difference(MemoryPointer other) => unchecked(Value - other.Value);
+
+        // Common named values
+        public static MemoryPointer Zero => new MemoryPointer(0UL);
+        public bool IsZero => Value == 0UL;
     }
 }
