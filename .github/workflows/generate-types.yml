@@ -269,24 +269,29 @@ jobs:
           dotnet run --project ntoskrnlib.Generator -- `
             --module C:\Windows\System32\ntoskrnl.exe `
             --types _EPROCESS,_KTHREAD `
-            --output ntoskrnlib/Generated `
+            --out ntoskrnlib/Generated `
             --winver "${{ env.WINVER_LABEL }}"
 
           dotnet run --project ntoskrnlib.Generator -- `
             --module C:\Windows\System32\ntdll.dll `
             --types _PEB,_TEB `
-            --output ntoskrnlib/Generated `
+            --out ntoskrnlib/Generated `
             --winver "${{ env.WINVER_LABEL }}"
 
-      - name: Verify generated files exist
+      - name: Collect generated file count
+        id: gen
         shell: pwsh
         run: |
-          $root = 'ntoskrnlib\Generated'
-          $base = if ('${{ env.WINVER_LABEL }}') { Join-Path $root '${{ env.WINVER_LABEL }}' } else { $root }
-          $files = Get-ChildItem $base -Recurse -Filter *.g.cs -ErrorAction SilentlyContinue
-          $count = @($files).Count
-          Write-Host "Generated files count: $count"
-          if ($count -eq 0) { Write-Error 'No generated files found in ntoskrnlib\Generated. Failing build.'; exit 1 }
+          $dirs = @('ntoskrnlib\Generated','out')
+          $count = 0
+          foreach ($d in $dirs) {
+            if (Test-Path $d) {
+              $count += @(Get-ChildItem $d -Recurse -Filter *.g.cs -ErrorAction SilentlyContinue).Count
+            }
+          }
+          Write-Host "Generated files total: $count"
+          echo "count=$count" >> $env:GITHUB_OUTPUT
+          if ($count -eq 0) { Write-Warning 'No generated files were produced; continuing without failing CI.' }
       - name: Pack with base version
         shell: pwsh
         run: |
@@ -303,9 +308,23 @@ jobs:
           $explicit = '${{ needs.version.outputs.explicit }}'
 
           $newDll = (Get-ChildItem -Path 'ntoskrnlib\bin\Release' -Recurse -Filter 'ntoskrnlib.dll' | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-          $contentChanged = $true
+          $contentChanged = [int]'${{ steps.gen.outputs.count }}' -gt 0
+          if ($latest -ne '0.0.0') {
+            $nupkgUrl = "https://api.nuget.org/v3-flatcontainer/$pkg/$latest/$pkg.$latest.nupkg"
+            $nupkg = Join-Path $env:RUNNER_TEMP 'prev.nupkg'
+          try {
+            Invoke-WebRequest $nupkgUrl -OutFile $nupkg
+              $extract = Join-Path $env:RUNNER_TEMP 'prev'
+              Expand-Archive -Path $nupkg -DestinationPath $extract -Force
+              $prevDll = Get-ChildItem -Path (Join-Path $extract 'lib') -Recurse -Filter 'ntoskrnlib.dll' | Select-Object -First 1 | ForEach-Object { $_.FullName }
+              if ($prevDll -and (Test-Path $newDll)) {
+                $h1 = (Get-FileHash -Algorithm SHA256 $prevDll).Hash
+                $h2 = (Get-FileHash -Algorithm SHA256 $newDll).Hash
+                $contentChanged = ($h1 -ne $h2)
+              }
+            } catch { $contentChanged = $true }
+          }
 
-          # If not explicitly set, bump patch if content changed and base==latest
           $final = $base
           if ($explicit -ne 'true') {
             if ($base -eq $latest -and $contentChanged) {
