@@ -43,11 +43,14 @@ jobs:
           set -euo pipefail
           pkg=ntoskrnlib
           url="https://api.nuget.org/v3-flatcontainer/$pkg/index.json"
-          if command -v jq >/dev/null 2>&1; then
-            latest=$(curl -fsSL "$url" | jq -r '[.versions[] | select(test("-")|not)][-1] // "0.0.0"')
+
+          latest_json=$(curl -fsSL "$url" 2>/dev/null || true)
+          if [ -z "$latest_json" ]; then
+            latest="0.0.0"
+          elif command -v jq >/dev/null 2>&1; then
+            latest=$(printf '%s' "$latest_json" | jq -r '[.versions[] | select(test("-")|not)][-1] // "0.0.0"')
           else
-            json=$(curl -fsSL "$url" || echo '{}')
-            latest=$(printf '%s' "$json" | tr -d '\n\r ' | sed 's/.*"versions":\[\(.*\)\].*/\1/' | tr ',' '\n' | tr -d '"' | grep -v '-' | tail -n 1)
+            latest=$(printf '%s' "$latest_json" | tr -d '\n\r ' | sed 's/.*"versions":\[\(.*\)\].*/\1/' | tr ',' '\n' | tr -d '"' | grep -v '-' | tail -n 1)
             latest=${latest:-0.0.0}
           fi
           label=none
