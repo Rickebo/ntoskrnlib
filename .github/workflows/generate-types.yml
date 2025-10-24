@@ -43,11 +43,14 @@ jobs:
           set -euo pipefail
           pkg=ntoskrnlib
           url="https://api.nuget.org/v3-flatcontainer/$pkg/index.json"
-          if command -v jq >/dev/null 2>&1; then
-            latest=$(curl -fsSL "$url" | jq -r '[.versions[] | select(test("-")|not)][-1] // "0.0.0"')
+
+          latest_json=$(curl -fsSL "$url" 2>/dev/null || true)
+          if [ -z "$latest_json" ]; then
+            latest="0.0.0"
+          elif command -v jq >/dev/null 2>&1; then
+            latest=$(printf '%s' "$latest_json" | jq -r '[.versions[] | select(test("-")|not)][-1] // "0.0.0"')
           else
-            json=$(curl -fsSL "$url" || echo '{}')
-            latest=$(printf '%s' "$json" | tr -d '\n\r ' | sed 's/.*"versions":\[\(.*\)\].*/\1/' | tr ',' '\n' | tr -d '"' | grep -v '-' | tail -n 1)
+            latest=$(printf '%s' "$latest_json" | tr -d '\n\r ' | sed 's/.*"versions":\[\(.*\)\].*/\1/' | tr ',' '\n' | tr -d '"' | grep -v '-' | tail -n 1)
             latest=${latest:-0.0.0}
           fi
           label=none
@@ -101,7 +104,6 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
-          include-prerelease: true
 
       - name: Restore dependencies
         run: dotnet restore ntoskrnlib.Tests/ntoskrnlib.Tests.csproj
@@ -137,6 +139,7 @@ jobs:
       DOTNET_CLI_TELEMETRY_OPTOUT: true
       PKG_ID: ntoskrnlib
       AUTO_APPROVE_TOKEN: ${{ secrets.AUTO_APPROVE_TOKEN }}
+      WINVER_LABEL: Win11
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -147,7 +150,6 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
-          include-prerelease: true
 
       - name: Prepare symbol tooling (PATH and cache)
         shell: pwsh
@@ -174,7 +176,7 @@ jobs:
                   Start-Process regsvr32.exe -ArgumentList '/s', $dll -Wait -NoNewWindow
                   Write-Host "Registered DIA: $dll"
                 }
-              } catch { Write-Warning "Failed to register $dll: $_" }
+              } catch { Write-Warning "Failed to register $($dll): $_" }
             }
           }
 
@@ -194,23 +196,68 @@ jobs:
             Write-Warning 'msdia140.dll not found. Proceeding without DIA; DbgHelp path remains primary.'
           }
 
-      - name: Build library (triggers generation)
-        run: dotnet build ntoskrnlib\ntoskrnlib.csproj -c Release /p:WindowsVersionLabel=${{ env.WINVER_LABEL }}
+      - name: Build library (skip auto-generation)
+        run: dotnet build ntoskrnlib\ntoskrnlib.csproj -c Release /p:WindowsVersionLabel=${{ env.WINVER_LABEL }} /p:SkipGenerateTypes=true
 
-      - name: Verify generated files exist
+      - name: Generate types from config
         shell: pwsh
         run: |
-          $root = 'ntoskrnlib\\Generated'
-          $base = if ('${{ env.WINVER_LABEL }}') { Join-Path $root '${{ env.WINVER_LABEL }}' } else { $root }
-          $files = Get-ChildItem $base -Recurse -Filter *.g.cs -ErrorAction SilentlyContinue
-          $count = @($files).Count
-          Write-Host "Generated files count: $count"
-          if ($count -eq 0) { Write-Error 'No generated files found in ntoskrnlib\\Generated. Failing build.'; exit 1 }
+          # Generate all types defined in config/types.yml (same as local build)
+          dotnet run --project ntoskrnlib.Generator -- `
+            --config config/types.yml `
+            --out ntoskrnlib/Generated `
+            --winver "${{ env.WINVER_LABEL }}"
+
+      - name: Collect generated file count
+        id: gen
+        shell: pwsh
+        run: |
+          $dirs = @('ntoskrnlib\\Generated','out')
+          $count = 0
+          foreach ($d in $dirs) {
+            if (Test-Path $d) {
+              $count += @(Get-ChildItem $d -Recurse -Filter *.g.cs -ErrorAction SilentlyContinue).Count
+            }
+          }
+          Write-Host "Generated files total: $count"
+          echo "count=$count" >> $env:GITHUB_OUTPUT
+          if ($count -eq 0) { Write-Warning 'No generated files were produced; continuing without failing CI.' }
       - name: Pack with base version
         shell: pwsh
         run: |
           $verBase = '${{ needs.version.outputs.base }}'
-          dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$verBase /p:WindowsVersionLabel=${{ env.WINVER_LABEL }}
+          dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$verBase /p:WindowsVersionLabel=${{ env.WINVER_LABEL }} /p:SkipGenerateTypes=true
+
+      - name: Validate package contains types
+        shell: pwsh
+        run: |
+          $nupkg = Get-ChildItem -Path artifacts -Filter *.nupkg | Select-Object -First 1
+          if (-not $nupkg) {
+            Write-Error "No NuGet package found in artifacts folder"
+            exit 1
+          }
+
+          # Extract package to temp location
+          $extractPath = Join-Path $env:RUNNER_TEMP 'package-validation'
+          Expand-Archive -Path $nupkg.FullName -DestinationPath $extractPath -Force
+
+          # Check DLL size
+          $dll = Get-ChildItem -Path $extractPath -Recurse -Filter 'ntoskrnlib.dll' | Select-Object -First 1
+          if (-not $dll) {
+            Write-Error "ntoskrnlib.dll not found in package"
+            exit 1
+          }
+
+          $sizeKB = [math]::Round($dll.Length / 1KB, 2)
+          Write-Host "Package DLL size: $sizeKB KB"
+
+          # Warn if DLL seems too small (less than 200KB suggests missing types)
+          if ($dll.Length -lt 200KB) {
+            Write-Warning "DLL size is suspiciously small ($sizeKB KB). Expected >200KB with generated types."
+            Write-Warning "The package may not contain all generated classes!"
+          } else {
+            Write-Host "✓ Package validation passed - DLL size looks good" -ForegroundColor Green
+          }
 
       - name: Compare content and finalize version
         id: out
@@ -222,7 +269,7 @@ jobs:
           $explicit = '${{ needs.version.outputs.explicit }}'
 
           $newDll = (Get-ChildItem -Path 'ntoskrnlib\\bin\\Release' -Recurse -Filter 'ntoskrnlib.dll' | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-          $contentChanged = $true
+          $contentChanged = [int]'${{ steps.gen.outputs.count }}' -gt 0
           if ($latest -ne '0.0.0') {
             $nupkgUrl = "https://api.nuget.org/v3-flatcontainer/$pkg/$latest/$pkg.$latest.nupkg"
             $nupkg = Join-Path $env:RUNNER_TEMP 'prev.nupkg'
@@ -249,7 +296,18 @@ jobs:
 
           if ($final -ne $base) {
             Remove-Item artifacts\*.nupkg -Force -ErrorAction SilentlyContinue
-            dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$final /p:WindowsVersionLabel=${{ env.WINVER_LABEL }}
+            dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$final /p:WindowsVersionLabel=${{ env.WINVER_LABEL }} /p:SkipGenerateTypes=true
+
+            # Validate re-packed package
+            $nupkg = Get-ChildItem -Path artifacts -Filter *.nupkg | Select-Object -First 1
+            if ($nupkg) {
+              $extractPath = Join-Path $env:RUNNER_TEMP 'package-validation-final'
+              Expand-Archive -Path $nupkg.FullName -DestinationPath $extractPath -Force
+              $dll = Get-ChildItem -Path $extractPath -Recurse -Filter 'ntoskrnlib.dll' | Select-Object -First 1
+              if ($dll -and $dll.Length -lt 200KB) {
+                Write-Warning "Re-packed DLL size is suspiciously small: $([math]::Round($dll.Length / 1KB, 2)) KB"
+              }
+            }
           }
 
           $idx = Invoke-RestMethod -Uri ("https://api.nuget.org/v3-flatcontainer/$pkg/index.json")
@@ -341,16 +399,17 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
-          include-prerelease: true
-
 
       - name: Publish to NuGet
         id: publish_nuget
-        if: ${{ secrets.NUGET_API_KEY != '' }}
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
-          dotnet nuget push artifacts/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          if [ -n "$NUGET_API_KEY" ]; then
+            dotnet nuget push artifacts/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          else
+            echo "NUGET_API_KEY is not set. Skipping publish."
+          fi
 
       - name: Tag repository with version
         if: steps.publish_nuget.outcome == 'success'

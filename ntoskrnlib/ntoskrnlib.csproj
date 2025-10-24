@@ -18,15 +18,15 @@
     <GenerateTypesDuringBuild>true</GenerateTypesDuringBuild>
   </PropertyGroup>
 
-  <!-- Disable automatic compile includes for Generated folder to avoid duplicates -->
-  <ItemGroup>
-    <Compile Remove="Generated\**\*" />
-  </ItemGroup>
+  <!-- Disable automatic compile includes to manually control what's included -->
+  <PropertyGroup>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
+  </PropertyGroup>
 
-  <!-- Always include any pre-generated files in the build -->
+  <!-- Explicitly include only *.g.cs files (not *.managed.g.cs) -->
   <ItemGroup>
-    <Compile Include="Generated\**\*.g.cs" />
-    <Compile Include="Generated\**\*.managed.g.cs" />
+    <Compile Include="Generated\**\*.g.cs" Exclude="Generated\**\*.managed.g.cs" />
   </ItemGroup>
 
 
