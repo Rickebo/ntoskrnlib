@@ -101,6 +101,7 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
+          include-prerelease: true
 
       - name: Restore dependencies
         run: dotnet restore ntoskrnlib.Tests/ntoskrnlib.Tests.csproj
@@ -146,6 +147,7 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
+          include-prerelease: true
 
       - name: Prepare symbol tooling (PATH and cache)
         shell: pwsh
@@ -339,6 +341,7 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
+          include-prerelease: true
 
 
       - name: Publish to NuGet
