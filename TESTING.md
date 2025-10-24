@@ -97,50 +97,27 @@ Tests are automatically run in the CI/CD pipeline before building and publishing
 ### Test Results in GitHub Actions
 
 Test results are available in multiple formats:
-- **Console output** - In the "Run tests" step
-- **Test Report** - Visual report in the Actions UI
-- **Artifacts** - Downloadable TRX files for detailed analysis
+- **Console output** - Detailed test execution logs
+- **Artifacts** - Downloadable test results (only on failure)
 
 ## Current Test Status
 
-**70 out of 82 tests passing (85%)**
+**✅ All 82 tests passing (100%)**
 
-### Known Issues
+### Fixed Issues
 
-1. **DynamicArray tests** (9 failures)
-   - Root cause: `DynamicArray` class needs `[DynamicStructure]` attribute
-   - Location: `ntoskrnlib.Common/Structure/DynamicArray.cs:8`
+1. **DynamicArray tests** ✅ FIXED
+   - Added `[DynamicStructure("DynamicArray")]` attribute to DynamicArray class
+   - Added explicit `DynamicArray.Register()` call in test constructor
+   - Location: [ntoskrnlib.Common/Structure/DynamicArray.cs:8](ntoskrnlib.Common/Structure/DynamicArray.cs#L8)
 
-2. **Address range tests** (3 failures)
-   - Root cause: Test addresses exceed 4096-byte memory buffer
-   - Tests affected:
-     - `DynamicStructure_CanReadNegativeIntegers` (address 0x1100)
-     - `DynamicStructure_CanReadMaxValues` (address 0x1200)
+2. **Address range tests** ✅ FIXED
+   - Increased test memory buffer from 4096 to 8192 bytes
+   - Location: [ntoskrnlib.Tests/DynamicStructureTests.cs:20](ntoskrnlib.Tests/DynamicStructureTests.cs#L20)
 
 3. **KeyBasedTestStruct** (excluded from automatic registration)
    - Requires `IOffsetParser` configuration
-   - Not a blocker for other tests
-
-## Fixing Remaining Issues
-
-### Fix DynamicArray tests
-Add the attribute to DynamicArray.cs:
-```csharp
-[DynamicStructure("DynamicArray")]  // Add this line
-public class DynamicArray : DynamicStructure
-{
-    // ...
-}
-```
-
-### Fix address range tests
-Increase test memory size in DynamicStructureTests.cs:
-```csharp
-public DynamicStructureTests()
-{
-    _memory = new TestMemorySource(8192);  // Increase from 4096 to 8192
-}
-```
+   - Not included in standard test suite
 
 ## Future Enhancements
 

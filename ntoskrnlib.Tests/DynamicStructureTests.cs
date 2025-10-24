@@ -17,7 +17,7 @@ public class DynamicStructureTests : TestFixtureBase
 
     public DynamicStructureTests()
     {
-        _memory = new TestMemorySource(4096);
+        _memory = new TestMemorySource(8192);  // Increased from 4096 to accommodate all test addresses
     }
 
     #region DynamicStructure Attribute Tests

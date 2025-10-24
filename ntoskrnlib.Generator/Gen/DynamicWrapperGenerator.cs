@@ -147,7 +147,7 @@ internal sealed class DynamicWrapperGenerator
                                 .WithRankSpecifiers(SyntaxFactory.SingletonList(
                                     SyntaxFactory.ArrayRankSpecifier(
                                         SyntaxFactory.SingletonSeparatedList<ExpressionSyntax>(SyntaxFactory.OmittedArraySizeExpression()))))
-                        })))))
+                        }))))
             .WithArgumentList(SyntaxFactory.ArgumentList())
             .WithInitializer(
                 SyntaxFactory.InitializerExpression(SyntaxKind.CollectionInitializerExpression,

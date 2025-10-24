@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 
 namespace ntoskrnlib.Structure
 {
+    [DynamicStructure("DynamicArray")]
     public class DynamicArray : DynamicStructure
     {
         private Type _lastType;

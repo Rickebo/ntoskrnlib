@@ -8,6 +8,12 @@ namespace ntoskrnlib.Tests;
 /// </summary>
 public class DynamicArrayTests : TestFixtureBase
 {
+    public DynamicArrayTests()
+    {
+        // Explicitly ensure DynamicArray is registered
+        DynamicArray.Register();
+    }
+
     [Fact]
     public void DynamicArray_GetSingleElement_ShouldReturnCorrectValue()
     {
