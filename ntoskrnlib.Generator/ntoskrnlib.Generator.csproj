@@ -22,4 +22,8 @@
     <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="2.0.72" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\ntoskrnlib.Common\ntoskrnlib.Common.csproj" />
+  </ItemGroup>
+
 </Project>

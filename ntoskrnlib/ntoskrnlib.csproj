@@ -18,9 +18,15 @@
     <GenerateTypesDuringBuild>true</GenerateTypesDuringBuild>
   </PropertyGroup>
 
+  <!-- Disable automatic compile includes for Generated folder to avoid duplicates -->
+  <ItemGroup>
+    <Compile Remove="Generated\**\*" />
+  </ItemGroup>
+
   <!-- Always include any pre-generated files in the build -->
   <ItemGroup>
     <Compile Include="Generated\**\*.g.cs" />
+    <Compile Include="Generated\**\*.managed.g.cs" />
   </ItemGroup>
 
 
@@ -33,12 +39,15 @@
     <Folder Include="Dynamic\" />
   </ItemGroup>
 
+
+  <ItemGroup>
+    <ProjectReference Include="..\ntoskrnlib.Common\ntoskrnlib.Common.csproj" />
+  </ItemGroup>
+
   <!-- Auto-generate sources before compilation on Windows -->
-  <Target Name="GenerateTypes"
-          BeforeTargets="CoreCompile"
-          Condition=" '$(OS)' == 'Windows_NT' and '$(GenerateTypesDuringBuild)' == 'true' and '$(SkipGenerateTypes)' != 'true' ">
+  <Target Name="GenerateTypes" BeforeTargets="CoreCompile" Condition=" '$(OS)' == 'Windows_NT' and '$(GenerateTypesDuringBuild)' == 'true' and '$(SkipGenerateTypes)' != 'true' ">
     <Message Text="[ntoskrnlib] Generating sources into $(MSBuildProjectDirectory)\Generated" Importance="High" />
     <MakeDir Directories="$(MSBuildProjectDirectory)\Generated" />
-    <Exec Command='dotnet run --project &quot;$(MSBuildThisFileDirectory)..\ntoskrnlib.Generator\ntoskrnlib.Generator.csproj&quot; -- --config &quot;$(MSBuildThisFileDirectory)..\config\types.yml&quot; -o &quot;$(MSBuildProjectDirectory)\Generated&quot; -w &quot;$(WindowsVersionLabel)&quot;' />
+    <Exec Command="dotnet run --project &quot;$(MSBuildThisFileDirectory)..\ntoskrnlib.Generator\ntoskrnlib.Generator.csproj&quot; -- --config &quot;$(MSBuildThisFileDirectory)..\config\types.yml&quot; -o &quot;$(MSBuildProjectDirectory)\Generated&quot; -w &quot;$(WindowsVersionLabel)&quot;" />
   </Target>
 </Project>

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -190,5 +191,97 @@ internal sealed class CodeGenerator
         var attr = SyntaxFactory.Attribute(SyntaxFactory.ParseName("MarshalAs"))
             .WithArgumentList(SyntaxFactory.AttributeArgumentList(args));
         return SyntaxFactory.AttributeList(SyntaxFactory.SingletonSeparatedList(attr));
+    }
+
+    /// <summary>
+    /// Generates a class-based structure that inherits from DynamicStructure.
+    /// This provides a managed, reflection-based alternative to the explicit layout struct.
+    /// </summary>
+    public string GenerateUdtAsClass(uint typeId, string? moduleSymbolPrefix = null)
+    {
+        var nameOriginal = _insp.GetTypeName(typeId);
+        var name = TypeSpec.SanitizeIdentifier(nameOriginal);
+        var sb = new StringBuilder();
+
+        // Using directives
+        sb.AppendLine("using System;");
+        sb.AppendLine("using System.Collections.Generic;");
+        sb.AppendLine("using ntoskrnlib.Structure;");
+        sb.AppendLine();
+
+        // Namespace
+        if (!string.IsNullOrWhiteSpace(_ns))
+        {
+            sb.AppendLine($"namespace {_ns}");
+            sb.AppendLine("{");
+        }
+
+        // Class declaration with DynamicStructure attribute
+        var symbolName = !string.IsNullOrWhiteSpace(moduleSymbolPrefix)
+            ? $"{moduleSymbolPrefix}!{nameOriginal}"
+            : nameOriginal;
+        sb.AppendLine($"    [DynamicStructure(\"{symbolName}\")]");
+        sb.AppendLine($"    public sealed class {name}Managed : DynamicStructure");
+        sb.AppendLine("    {");
+
+        // Generate properties with Offset attributes
+        var fields = _insp.GetUdtFields(typeId);
+        int syntheticBaseIdx = 0;
+
+        foreach (var f in fields)
+        {
+            var fieldName = f.Tag == Interop.DbgHelp.SymTag.BaseClass
+                ? $"__base{syntheticBaseIdx++}"
+                : TypeSpec.SanitizeIdentifier(f.Name);
+
+            var ts = _insp.ResolveType(f.TypeId);
+            string csType;
+
+            if (_flattenUdts && ts.TryAsUdt(out var _, out var udtSize))
+            {
+                // Flatten as byte array
+                csType = "byte[]";
+            }
+            else if (ts.TryAsArray(out var elemSpec, out var count))
+            {
+                // Array type
+                var elemTypeName = elemSpec.ToCSharpFieldType().TrimEnd(']', '[');
+                csType = $"{elemTypeName}[]";
+            }
+            else
+            {
+                csType = ts.ToCSharpFieldType();
+            }
+
+            // Add Offset attribute and property
+            sb.AppendLine($"        [Offset({f.Offset}UL)]");
+            sb.AppendLine($"        public {csType} {fieldName} {{ get; set; }}");
+            sb.AppendLine();
+        }
+
+        // Constructor
+        sb.AppendLine($"        public {name}Managed(IMemorySource memory, MemoryPointer baseAddress)");
+        sb.AppendLine("            : base(memory, baseAddress)");
+        sb.AppendLine("        {");
+        sb.AppendLine("        }");
+        sb.AppendLine();
+
+        // Static constructor with registration
+        sb.AppendLine($"        [RegisterMethod]");
+        sb.AppendLine($"        public static void Register()");
+        sb.AppendLine("        {");
+        sb.AppendLine($"            DynamicStructure.Register<{name}Managed>();");
+        sb.AppendLine("        }");
+
+        // Close class
+        sb.AppendLine("    }");
+
+        // Close namespace
+        if (!string.IsNullOrWhiteSpace(_ns))
+        {
+            sb.AppendLine("}");
+        }
+
+        return sb.ToString();
     }
 }

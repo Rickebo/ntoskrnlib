@@ -34,12 +34,24 @@ internal sealed class UdtEmitter
             var typeId = queue.Dequeue();
             if (!seen.Add(typeId)) continue;
             var name = _insp.GetTypeName(typeId);
+
+            // Generate explicit layout struct
             var code = _gen.GenerateUdt(typeId);
             var fileName = Path.Combine(outputDir, TypeSpec.SanitizeIdentifier(name) + ".g.cs");
             if (!File.Exists(fileName))
             {
                 File.WriteAllText(fileName, code);
                 written++;
+            }
+
+            // Generate class-based structure using Structure namespace
+            var classCode = _gen.GenerateUdtAsClass(typeId, _moduleSym);
+            var classDir = Path.Combine(outputDir, "Managed");
+            Directory.CreateDirectory(classDir);
+            var classFile = Path.Combine(classDir, TypeSpec.SanitizeIdentifier(name) + ".managed.g.cs");
+            if (!File.Exists(classFile))
+            {
+                File.WriteAllText(classFile, classCode);
             }
 
             if (_dyn != null && _ns != null && _moduleSym != null)
