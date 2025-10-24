@@ -160,8 +160,10 @@ jobs:
           foreach ($p in $candidates) { if (Test-Path $p) { $p | Out-File -Append -FilePath $env:GITHUB_PATH; Write-Host "Added to PATH: $p" } }
 
       - name: Attempt DIA registration (non-blocking)
+        continue-on-error: true
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Continue'
           function Register-Dia($dlls) {
             foreach ($dll in $dlls) {
               try {
@@ -175,10 +177,10 @@ jobs:
 
           # Try to locate msdia140.dll in common Visual Studio locations present on hosted runners
           $search = @(
-            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\*\DIA SDK\bin\amd64\msdia140.dll",
-            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\*\Common7\IDE\msdia140.dll",
-            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\*\Common7\Packages\Debugger\msdia140.dll",
-            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2019\*\DIA SDK\bin\amd64\msdia140.dll"
+            "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\*\DIA SDK\bin\amd64\msdia140.dll",
+            "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\*\Common7\IDE\msdia140.dll",
+            "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\*\Common7\Packages\Debugger\msdia140.dll",
+            "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\*\DIA SDK\bin\amd64\msdia140.dll"
           )
           $found = @()
           foreach ($pat in $search) { $found += Get-ChildItem -Path $pat -ErrorAction SilentlyContinue }
