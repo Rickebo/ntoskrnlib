@@ -43,11 +43,14 @@ jobs:
           set -euo pipefail
           pkg=ntoskrnlib
           url="https://api.nuget.org/v3-flatcontainer/$pkg/index.json"
-          if command -v jq >/dev/null 2>&1; then
-            latest=$(curl -fsSL "$url" | jq -r '[.versions[] | select(test("-")|not)][-1] // "0.0.0"')
+
+          latest_json=$(curl -fsSL "$url" 2>/dev/null || true)
+          if [ -z "$latest_json" ]; then
+            latest="0.0.0"
+          elif command -v jq >/dev/null 2>&1; then
+            latest=$(printf '%s' "$latest_json" | jq -r '[.versions[] | select(test("-")|not)][-1] // "0.0.0"')
           else
-            json=$(curl -fsSL "$url" || echo '{}')
-            latest=$(printf '%s' "$json" | tr -d '\n\r ' | sed 's/.*"versions":\[\(.*\)\].*/\1/' | tr ',' '\n' | tr -d '"' | grep -v '-' | tail -n 1)
+            latest=$(printf '%s' "$latest_json" | tr -d '\n\r ' | sed 's/.*"versions":\[\(.*\)\].*/\1/' | tr ',' '\n' | tr -d '"' | grep -v '-' | tail -n 1)
             latest=${latest:-0.0.0}
           fi
           label=none
@@ -101,7 +104,6 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
-          include-prerelease: true
 
       - name: Restore dependencies
         run: dotnet restore ntoskrnlib.Tests/ntoskrnlib.Tests.csproj
@@ -147,7 +149,6 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
-          include-prerelease: true
 
       - name: Prepare symbol tooling (PATH and cache)
         shell: pwsh
@@ -341,16 +342,17 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
-          include-prerelease: true
-
 
       - name: Publish to NuGet
         id: publish_nuget
-        if: ${{ secrets.NUGET_API_KEY != '' }}
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
-          dotnet nuget push artifacts/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          if [ -n "$NUGET_API_KEY" ]; then
+            dotnet nuget push artifacts/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          else
+            echo "NUGET_API_KEY is not set. Skipping publish."
+          fi
 
       - name: Tag repository with version
         if: steps.publish_nuget.outcome == 'success'
