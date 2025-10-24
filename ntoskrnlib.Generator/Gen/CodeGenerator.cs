@@ -194,94 +194,185 @@ internal sealed class CodeGenerator
     }
 
     /// <summary>
-    /// Generates a class-based structure that inherits from DynamicStructure.
+    /// Converts a Windows-style type name to C# PascalCase naming convention.
+    /// Examples: _EPROCESS -> Eprocess, _RTL_USER_PROCESS_PARAMETERS -> RtlUserProcessParameters
+    /// </summary>
+    public static string ToCSharpClassName(string typeName)
+    {
+        // Remove leading underscores
+        var cleaned = typeName.TrimStart('_');
+
+        // Split on underscores
+        var parts = cleaned.Split('_', StringSplitOptions.RemoveEmptyEntries);
+
+        // Convert each part to PascalCase
+        var result = new StringBuilder();
+        foreach (var part in parts)
+        {
+            if (part.Length == 0) continue;
+
+            // If the part is all uppercase or all lowercase, capitalize first letter and lowercase the rest
+            if (part.All(char.IsUpper) || part.All(char.IsLower))
+            {
+                result.Append(char.ToUpperInvariant(part[0]));
+                if (part.Length > 1)
+                    result.Append(part.Substring(1).ToLowerInvariant());
+            }
+            else
+            {
+                // Mixed case, keep as is
+                result.Append(part);
+            }
+        }
+
+        return result.ToString();
+    }
+
+    /// <summary>
+    /// Generates a class-based structure that inherits from DynamicStructure using Roslyn.
     /// This provides a managed, reflection-based alternative to the explicit layout struct.
     /// </summary>
     public string GenerateUdtAsClass(uint typeId, string? moduleSymbolPrefix = null)
     {
         var nameOriginal = _insp.GetTypeName(typeId);
-        var name = TypeSpec.SanitizeIdentifier(nameOriginal);
-        var sb = new StringBuilder();
+        var className = ToCSharpClassName(nameOriginal);
 
-        // Using directives
-        sb.AppendLine("using System;");
-        sb.AppendLine("using System.Collections.Generic;");
-        sb.AppendLine("using ntoskrnlib.Structure;");
-        sb.AppendLine();
+        // compilation unit with usings
+        var cu = SyntaxFactory.CompilationUnit()
+            .WithUsings(
+                SyntaxFactory.List(new UsingDirectiveSyntax[]
+                {
+                    SyntaxFactory.UsingDirective(SyntaxFactory.ParseName("System")),
+                    SyntaxFactory.UsingDirective(SyntaxFactory.ParseName("System.Collections.Generic")),
+                    SyntaxFactory.UsingDirective(SyntaxFactory.ParseName("ntoskrnlib.Structure"))
+                }));
 
-        // Namespace
-        if (!string.IsNullOrWhiteSpace(_ns))
-        {
-            sb.AppendLine($"namespace {_ns}");
-            sb.AppendLine("{");
-        }
-
-        // Class declaration with DynamicStructure attribute
+        // [DynamicStructure("module!Type")] attribute
         var symbolName = !string.IsNullOrWhiteSpace(moduleSymbolPrefix)
             ? $"{moduleSymbolPrefix}!{nameOriginal}"
             : nameOriginal;
-        sb.AppendLine($"    [DynamicStructure(\"{symbolName}\")]");
-        sb.AppendLine($"    public sealed class {name}Managed : DynamicStructure");
-        sb.AppendLine("    {");
+        var dynAttr = SyntaxFactory.Attribute(SyntaxFactory.IdentifierName("DynamicStructure"))
+            .WithArgumentList(
+                SyntaxFactory.AttributeArgumentList(
+                    SyntaxFactory.SingletonSeparatedList(
+                        SyntaxFactory.AttributeArgument(
+                            SyntaxFactory.LiteralExpression(SyntaxKind.StringLiteralExpression, SyntaxFactory.Literal(symbolName))))));
 
-        // Generate properties with Offset attributes
-        var fields = _insp.GetUdtFields(typeId);
+        // class declaration sealed : DynamicStructure
+        var classDecl = SyntaxFactory.ClassDeclaration(className)
+            .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword), SyntaxFactory.Token(SyntaxKind.SealedKeyword))
+            .WithBaseList(
+                SyntaxFactory.BaseList(
+                    SyntaxFactory.SingletonSeparatedList<BaseTypeSyntax>(
+                        SyntaxFactory.SimpleBaseType(SyntaxFactory.IdentifierName("DynamicStructure")))))
+            .WithAttributeLists(SyntaxFactory.SingletonList(SyntaxFactory.AttributeList(SyntaxFactory.SingletonSeparatedList(dynAttr))));
+
+        // properties with [Offset] attribute
         int syntheticBaseIdx = 0;
-
-        foreach (var f in fields)
+        foreach (var f in _insp.GetUdtFields(typeId))
         {
-            var fieldName = f.Tag == Interop.DbgHelp.SymTag.BaseClass
+            var fieldName = f.Tag == DbgHelp.SymTag.BaseClass
                 ? $"__base{syntheticBaseIdx++}"
                 : TypeSpec.SanitizeIdentifier(f.Name);
 
             var ts = _insp.ResolveType(f.TypeId);
-            string csType;
+            TypeSyntax propType;
+            var attrLists = new List<AttributeListSyntax>();
 
-            if (_flattenUdts && ts.TryAsUdt(out var _, out var udtSize))
+            // [Offset(ofsUL)]
+            var offsetAttr = SyntaxFactory.Attribute(SyntaxFactory.IdentifierName("Offset"))
+                .WithArgumentList(
+                    SyntaxFactory.AttributeArgumentList(
+                        SyntaxFactory.SingletonSeparatedList(
+                            SyntaxFactory.AttributeArgument(
+                                SyntaxFactory.ParseExpression($"{f.Offset}UL")))));
+            attrLists.Add(SyntaxFactory.AttributeList(SyntaxFactory.SingletonSeparatedList(offsetAttr)));
+
+            if (_flattenUdts && ts.TryAsUdt(out _, out var udtSize))
             {
-                // Flatten as byte array
-                csType = "byte[]";
+                propType = SyntaxFactory.ArrayType(SyntaxFactory.PredefinedType(SyntaxFactory.Token(SyntaxKind.ByteKeyword)))
+                    .WithRankSpecifiers(SyntaxFactory.SingletonList(
+                        SyntaxFactory.ArrayRankSpecifier(
+                            SyntaxFactory.SingletonSeparatedList<ExpressionSyntax>(SyntaxFactory.OmittedArraySizeExpression()))));
             }
-            else if (ts.TryAsArray(out var elemSpec, out var count))
+            else if (ts.TryAsArray(out var elemSpec, out var _))
             {
-                // Array type
                 var elemTypeName = elemSpec.ToCSharpFieldType().TrimEnd(']', '[');
-                csType = $"{elemTypeName}[]";
+                propType = SyntaxFactory.ArrayType(TypeFromName(elemTypeName))
+                    .WithRankSpecifiers(SyntaxFactory.SingletonList(
+                        SyntaxFactory.ArrayRankSpecifier(
+                            SyntaxFactory.SingletonSeparatedList<ExpressionSyntax>(SyntaxFactory.OmittedArraySizeExpression()))));
             }
             else
             {
-                csType = ts.ToCSharpFieldType();
+                propType = TypeFromName(ts.ToCSharpFieldType());
             }
 
-            // Add Offset attribute and property
-            sb.AppendLine($"        [Offset({f.Offset}UL)]");
-            sb.AppendLine($"        public {csType} {fieldName} {{ get; set; }}");
-            sb.AppendLine();
+            var propDecl = SyntaxFactory.PropertyDeclaration(propType, SyntaxFactory.Identifier(fieldName))
+                .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword))
+                .WithAccessorList(
+                    SyntaxFactory.AccessorList(
+                        SyntaxFactory.List(new[]
+                        {
+                            SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
+                                .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken)),
+                            SyntaxFactory.AccessorDeclaration(SyntaxKind.SetAccessorDeclaration)
+                                .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken))
+                        })))
+                .WithAttributeLists(SyntaxFactory.List(attrLists));
+
+            classDecl = classDecl.AddMembers(propDecl);
         }
 
-        // Constructor
-        sb.AppendLine($"        public {name}Managed(IMemorySource memory, MemoryPointer baseAddress)");
-        sb.AppendLine("            : base(memory, baseAddress)");
-        sb.AppendLine("        {");
-        sb.AppendLine("        }");
-        sb.AppendLine();
+        // ctor: (IMemorySource memory, MemoryPointer baseAddress) : base(memory, baseAddress) { }
+        var ctorDecl = SyntaxFactory.ConstructorDeclaration(className)
+            .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword))
+            .WithParameterList(
+                SyntaxFactory.ParameterList(
+                    SyntaxFactory.SeparatedList(new[]
+                    {
+                        SyntaxFactory.Parameter(SyntaxFactory.Identifier("memory")).WithType(SyntaxFactory.IdentifierName("IMemorySource")),
+                        SyntaxFactory.Parameter(SyntaxFactory.Identifier("baseAddress")).WithType(SyntaxFactory.IdentifierName("MemoryPointer"))
+                    })))
+            .WithInitializer(
+                SyntaxFactory.ConstructorInitializer(
+                    SyntaxKind.BaseConstructorInitializer,
+                    SyntaxFactory.ArgumentList(
+                        SyntaxFactory.SeparatedList(new[]
+                        {
+                            SyntaxFactory.Argument(SyntaxFactory.IdentifierName("memory")),
+                            SyntaxFactory.Argument(SyntaxFactory.IdentifierName("baseAddress"))
+                        }))))
+            .WithBody(SyntaxFactory.Block());
+        classDecl = classDecl.AddMembers(ctorDecl);
 
-        // Static constructor with registration
-        sb.AppendLine($"        [RegisterMethod]");
-        sb.AppendLine($"        public static void Register()");
-        sb.AppendLine("        {");
-        sb.AppendLine($"            DynamicStructure.Register<{name}Managed>();");
-        sb.AppendLine("        }");
+        // [RegisterMethod] public static void Register() { DynamicStructure.Register<ClassName>(); }
+        var regAttr = SyntaxFactory.Attribute(SyntaxFactory.IdentifierName("RegisterMethod"));
+        var registerMethod = SyntaxFactory.MethodDeclaration(SyntaxFactory.PredefinedType(SyntaxFactory.Token(SyntaxKind.VoidKeyword)), "Register")
+            .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword), SyntaxFactory.Token(SyntaxKind.StaticKeyword))
+            .WithAttributeLists(SyntaxFactory.SingletonList(SyntaxFactory.AttributeList(SyntaxFactory.SingletonSeparatedList(regAttr))))
+            .WithBody(
+                SyntaxFactory.Block(
+                    SyntaxFactory.ExpressionStatement(
+                        SyntaxFactory.InvocationExpression(
+                                SyntaxFactory.GenericName("DynamicStructure.Register")
+                                    .WithTypeArgumentList(
+                                        SyntaxFactory.TypeArgumentList(
+                                            SyntaxFactory.SingletonSeparatedList<TypeSyntax>(
+                                                SyntaxFactory.IdentifierName(className)))))
+                            .WithArgumentList(SyntaxFactory.ArgumentList()))));
+        classDecl = classDecl.AddMembers(registerMethod);
 
-        // Close class
-        sb.AppendLine("    }");
-
-        // Close namespace
         if (!string.IsNullOrWhiteSpace(_ns))
         {
-            sb.AppendLine("}");
+            var nsDecl = SyntaxFactory.NamespaceDeclaration(SyntaxFactory.ParseName(_ns!)).AddMembers(classDecl);
+            cu = cu.AddMembers(nsDecl);
+        }
+        else
+        {
+            cu = cu.AddMembers(classDecl);
         }
 
-        return sb.ToString();
+        return cu.NormalizeWhitespace().ToFullString();
     }
 }

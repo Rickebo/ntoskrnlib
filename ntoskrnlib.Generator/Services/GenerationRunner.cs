@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.Extensions.Logging;
 using Microsoft.Win32;
 using ntoskrnlib.Abstractions;
@@ -274,7 +277,7 @@ internal sealed class GenerationRunner : IGenerationRunner
                     var dia = _diaFactory.TryCreate(module, SymbolSession.BuildDefaultSymbolPath());
                     if (dia != null)
                     {
-                        var emitterDia = new DiaEmitter(dia, ns);
+                        var emitterDia = new DiaEmitter(dia, ns, moduleSym);
                         foreach (var name in dia.EnumerateUdts())
                         {
                             try { total += emitterDia.GenerateWithDependencies(name, outDir, ce.Flatten); }
@@ -326,7 +329,94 @@ internal sealed class GenerationRunner : IGenerationRunner
                 }
             }
         }
+
+        // Generate registry file for managed classes
+        GenerateStructureRegistry(output, versionId);
+
         return total;
+    }
+
+    private void GenerateStructureRegistry(string output, string versionId)
+    {
+        try
+        {
+            // Find all Managed directories
+            var versionDir = Path.Combine(output, versionId);
+            if (!Directory.Exists(versionDir)) return;
+
+            var managedDirs = Directory.GetDirectories(versionDir, "Managed", SearchOption.AllDirectories);
+            if (managedDirs.Length == 0) return;
+
+            foreach (var managedDir in managedDirs)
+            {
+                var classFiles = Directory.GetFiles(managedDir, "*.g.cs");
+                if (classFiles.Length == 0) continue;
+
+                // Extract class names from filenames (remove .g.cs extension)
+                var classNames = classFiles
+                    .Select(f =>
+                    {
+                        var nameWithoutExt = Path.GetFileNameWithoutExtension(f); // Removes .cs
+                        // Remove .g suffix if present
+                        return nameWithoutExt.EndsWith(".g")
+                            ? nameWithoutExt.Substring(0, nameWithoutExt.Length - 2)
+                            : nameWithoutExt;
+                    })
+                    .OrderBy(n => n)
+                    .ToList();
+
+                // Determine namespace from parent directory
+                var moduleDir = Path.GetFileName(Path.GetDirectoryName(managedDir)!);
+                var ns = $"ntoskrnlib.{versionId}.{moduleDir}";
+
+            // Generate registry file via Roslyn
+                var cu = SyntaxFactory.CompilationUnit()
+                    .WithUsings(SyntaxFactory.List(new UsingDirectiveSyntax[]
+                    {
+                        SyntaxFactory.UsingDirective(SyntaxFactory.ParseName("System")),
+                        SyntaxFactory.UsingDirective(SyntaxFactory.ParseName("ntoskrnlib.Structure"))
+                    }));
+
+                var classDecl = SyntaxFactory.ClassDeclaration("StructureRegistry")
+                    .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword),
+                                   SyntaxFactory.Token(SyntaxKind.StaticKeyword));
+
+                // public static void RegisterAll() { <Class>.Register(); ... }
+                var statements = new System.Collections.Generic.List<StatementSyntax>();
+                foreach (var className in classNames)
+                {
+                    var invoke = SyntaxFactory.ExpressionStatement(
+                        SyntaxFactory.InvocationExpression(
+                            SyntaxFactory.MemberAccessExpression(
+                                SyntaxKind.SimpleMemberAccessExpression,
+                                SyntaxFactory.IdentifierName(className),
+                                SyntaxFactory.IdentifierName("Register"))))
+                        .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
+                    statements.Add(invoke);
+                }
+
+                var registerAll = SyntaxFactory.MethodDeclaration(
+                        SyntaxFactory.PredefinedType(SyntaxFactory.Token(SyntaxKind.VoidKeyword)),
+                        "RegisterAll")
+                    .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword),
+                                   SyntaxFactory.Token(SyntaxKind.StaticKeyword))
+                    .WithBody(SyntaxFactory.Block(statements));
+
+                classDecl = classDecl.AddMembers(registerAll);
+
+                var nsDecl = SyntaxFactory.NamespaceDeclaration(
+                    SyntaxFactory.ParseName(ns)).AddMembers(classDecl);
+                cu = cu.AddMembers(nsDecl);
+
+                var registryFile = Path.Combine(managedDir, "StructureRegistry.managed.g.cs");
+                File.WriteAllText(registryFile, cu.NormalizeWhitespace().ToFullString());
+                _log.LogInformation("Generated structure registry: {file}", registryFile);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Failed to generate structure registry");
+        }
     }
 
     private static string NormalizeVersionLabel(string? label)

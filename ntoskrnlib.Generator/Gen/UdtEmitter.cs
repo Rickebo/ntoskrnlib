@@ -45,13 +45,21 @@ internal sealed class UdtEmitter
             }
 
             // Generate class-based structure using Structure namespace
-            var classCode = _gen.GenerateUdtAsClass(typeId, _moduleSym);
-            var classDir = Path.Combine(outputDir, "Managed");
-            Directory.CreateDirectory(classDir);
-            var classFile = Path.Combine(classDir, TypeSpec.SanitizeIdentifier(name) + ".managed.g.cs");
-            if (!File.Exists(classFile))
+            try
             {
-                File.WriteAllText(classFile, classCode);
+                var classCode = _gen.GenerateUdtAsClass(typeId, _moduleSym);
+                var className = CodeGenerator.ToCSharpClassName(name);
+                var classDir = Path.Combine(outputDir, "Managed");
+                Directory.CreateDirectory(classDir);
+                var classFile = Path.Combine(classDir, className + ".managed.g.cs");
+                if (!File.Exists(classFile))
+                {
+                    File.WriteAllText(classFile, classCode);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WARNING] Failed to generate managed class for {name}: {ex.Message}");
             }
 
             if (_dyn != null && _ns != null && _moduleSym != null)
