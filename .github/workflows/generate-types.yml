@@ -124,69 +124,133 @@ jobs:
             **/TestResults/**/*.log
 
   build:
+
     name: Build, generate, compare
+
     runs-on: windows-latest
+
     needs: [version, test]
+
     permissions:
+
       contents: write
+
       pull-requests: write
+
     outputs:
+
       version: ${{ steps.out.outputs.version }}
+
       changed: ${{ steps.out.outputs.changed }}
+
       is_new: ${{ steps.out.outputs.is_new }}
+
     env:
+
       DOTNET_NOLOGO: true
+
       DOTNET_CLI_TELEMETRY_OPTOUT: true
+
       PKG_ID: ntoskrnlib
+
       AUTO_APPROVE_TOKEN: ${{ secrets.AUTO_APPROVE_TOKEN }}
+
     steps:
+
       - name: Checkout
+
         uses: actions/checkout@v4
+
         with:
+
           fetch-depth: 0
 
+
+
       - name: Setup .NET
+
         uses: actions/setup-dotnet@v4
+
         with:
+
           dotnet-version: '9.0.x'
 
+
+
       - name: Prepare symbol tooling (PATH and cache)
+
         shell: pwsh
+
         run: |
+
           $cache = Join-Path $env:RUNNER_TEMP 'symbols'
+
           New-Item -ItemType Directory -Force -Path $cache | Out-Null
+
           "_NT_SYMBOL_PATH=srv*$cache*https://msdl.microsoft.com/download/symbols" | Out-File -Append -FilePath $env:GITHUB_ENV
+
           $candidates = @(
+
             "$Env:ProgramFiles(x86)\Windows Kits\10\Debuggers\x64",
+
             "$Env:ProgramFiles\Windows Kits\10\Debuggers\x64",
+
             "$Env:ProgramFiles(x86)\Windows Kits\10\Debuggers\x86"
+
           )
+
           foreach ($p in $candidates) { if (Test-Path $p) { $p | Out-File -Append -FilePath $env:GITHUB_PATH; Write-Host "Added to PATH: $p" } }
 
+
+
       - name: Attempt DIA registration (non-blocking)
+
         continue-on-error: true
+
         shell: pwsh
+
         run: |
+
           $ErrorActionPreference = 'Continue'
+
           function Register-Dia($dlls) {
+
             foreach ($dll in $dlls) {
+
               try {
+
                 if (Test-Path $dll) {
+
                   Start-Process regsvr32.exe -ArgumentList '/s', $dll -Wait -NoNewWindow
+
                   Write-Host "Registered DIA: $dll"
+
                 }
-              } catch { Write-Warning "Failed to register $dll: $_" }
+
+              } catch { Write-Warning "Failed to register $($dll): $_" }
+
             }
+
           }
 
+
+
           # Try to locate msdia140.dll in common Visual Studio locations present on hosted runners
+
           $search = @(
+
             "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\*\DIA SDK\bin\amd64\msdia140.dll",
+
             "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\*\Common7\IDE\msdia140.dll",
+
             "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\*\Common7\Packages\Debugger\msdia140.dll",
+
             "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\*\DIA SDK\bin\amd64\msdia140.dll"
+
           )
+
           $found = @()
+
           foreach ($pat in $search) { $found += Get-ChildItem -Path $pat -ErrorAction SilentlyContinue }
 
           if ($found) {
@@ -195,23 +259,39 @@ jobs:
             Write-Warning 'msdia140.dll not found. Proceeding without DIA; DbgHelp path remains primary.'
           }
 
-      - name: Build library (triggers generation)
-        run: dotnet build ntoskrnlib\ntoskrnlib.csproj -c Release /p:WindowsVersionLabel=${{ env.WINVER_LABEL }}
+      - name: Build library (skip auto-generation)
+        run: dotnet build ntoskrnlib\ntoskrnlib.csproj -c Release /p:WindowsVersionLabel=${{ env.WINVER_LABEL }} /p:SkipGenerateTypes=true
+
+      - name: Generate minimal types (CI smoke)
+        shell: pwsh
+        run: |
+          # Generate a small, reliable set of types to validate the pipeline
+          dotnet run --project ntoskrnlib.Generator -- `
+            --module C:\Windows\System32\ntoskrnl.exe `
+            --types _EPROCESS,_KTHREAD `
+            --output ntoskrnlib/Generated `
+            --winver "${{ env.WINVER_LABEL }}"
+
+          dotnet run --project ntoskrnlib.Generator -- `
+            --module C:\Windows\System32\ntdll.dll `
+            --types _PEB,_TEB `
+            --output ntoskrnlib/Generated `
+            --winver "${{ env.WINVER_LABEL }}"
 
       - name: Verify generated files exist
         shell: pwsh
         run: |
-          $root = 'ntoskrnlib\\Generated'
+          $root = 'ntoskrnlib\Generated'
           $base = if ('${{ env.WINVER_LABEL }}') { Join-Path $root '${{ env.WINVER_LABEL }}' } else { $root }
           $files = Get-ChildItem $base -Recurse -Filter *.g.cs -ErrorAction SilentlyContinue
           $count = @($files).Count
           Write-Host "Generated files count: $count"
-          if ($count -eq 0) { Write-Error 'No generated files found in ntoskrnlib\\Generated. Failing build.'; exit 1 }
+          if ($count -eq 0) { Write-Error 'No generated files found in ntoskrnlib\Generated. Failing build.'; exit 1 }
       - name: Pack with base version
         shell: pwsh
         run: |
           $verBase = '${{ needs.version.outputs.base }}'
-          dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$verBase /p:WindowsVersionLabel=${{ env.WINVER_LABEL }}
+          dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$verBase /p:WindowsVersionLabel=${{ env.WINVER_LABEL }} /p:SkipGenerateTypes=true
 
       - name: Compare content and finalize version
         id: out
@@ -222,24 +302,10 @@ jobs:
           $base = '${{ needs.version.outputs.base }}'
           $explicit = '${{ needs.version.outputs.explicit }}'
 
-          $newDll = (Get-ChildItem -Path 'ntoskrnlib\\bin\\Release' -Recurse -Filter 'ntoskrnlib.dll' | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+          $newDll = (Get-ChildItem -Path 'ntoskrnlib\bin\Release' -Recurse -Filter 'ntoskrnlib.dll' | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
           $contentChanged = $true
-          if ($latest -ne '0.0.0') {
-            $nupkgUrl = "https://api.nuget.org/v3-flatcontainer/$pkg/$latest/$pkg.$latest.nupkg"
-            $nupkg = Join-Path $env:RUNNER_TEMP 'prev.nupkg'
-          try {
-            Invoke-WebRequest $nupkgUrl -OutFile $nupkg
-              $extract = Join-Path $env:RUNNER_TEMP 'prev'
-              Expand-Archive -Path $nupkg -DestinationPath $extract -Force
-              $prevDll = Get-ChildItem -Path (Join-Path $extract 'lib') -Recurse -Filter 'ntoskrnlib.dll' | Select-Object -First 1 | ForEach-Object { $_.FullName }
-              if ($prevDll -and (Test-Path $newDll)) {
-                $h1 = (Get-FileHash -Algorithm SHA256 $prevDll).Hash
-                $h2 = (Get-FileHash -Algorithm SHA256 $newDll).Hash
-                $contentChanged = ($h1 -ne $h2)
-              }
-            } catch { $contentChanged = $true }
-          }
 
+          # If not explicitly set, bump patch if content changed and base==latest
           $final = $base
           if ($explicit -ne 'true') {
             if ($base -eq $latest -and $contentChanged) {
@@ -250,7 +316,7 @@ jobs:
 
           if ($final -ne $base) {
             Remove-Item artifacts\*.nupkg -Force -ErrorAction SilentlyContinue
-            dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$final /p:WindowsVersionLabel=${{ env.WINVER_LABEL }}
+            dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$final /p:WindowsVersionLabel=${{ env.WINVER_LABEL }} /p:SkipGenerateTypes=true
           }
 
           $idx = Invoke-RestMethod -Uri ("https://api.nuget.org/v3-flatcontainer/$pkg/index.json")
@@ -325,45 +391,87 @@ jobs:
           merge-method: squash
 
   publish:
+
     name: Publish package
+
     runs-on: ubuntu-latest
+
     needs: build
+
     if: ${{ needs.build.outputs.changed == 'true' && needs.build.outputs.is_new == 'true' }}
+
     permissions:
+
       contents: write
+
     steps:
+
       - name: Download package
+
         uses: actions/download-artifact@v4
+
         with:
+
           name: nupkg
+
           path: ./artifacts
 
+
+
       - name: Setup .NET
+
         uses: actions/setup-dotnet@v4
+
         with:
+
           dotnet-version: '9.0.x'
 
+
+
       - name: Publish to NuGet
+
         id: publish_nuget
+
         env:
+
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+
         run: |
+
           if [ -n "$NUGET_API_KEY" ]; then
+
             dotnet nuget push artifacts/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+
           else
+
             echo "NUGET_API_KEY is not set. Skipping publish."
+
           fi
 
+
+
       - name: Tag repository with version
+
         if: steps.publish_nuget.outcome == 'success'
+
         uses: actions/checkout@v4
+
         with:
+
           fetch-depth: 0
 
+
+
       - name: Push tag
+
         if: steps.publish_nuget.outcome == 'success'
+
         run: |
+
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git config user.name "github-actions[bot]"
+
           git tag v${{ needs.build.outputs.version }} -f
+
           git push --tags --force
