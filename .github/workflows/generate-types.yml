@@ -159,7 +159,7 @@ jobs:
           )
           foreach ($p in $candidates) { if (Test-Path $p) { $p | Out-File -Append -FilePath $env:GITHUB_PATH; Write-Host "Added to PATH: $p" } }
 
-      - name: Ensure DIA (msdia140.dll) is present and registered
+      - name: Attempt DIA registration (non-blocking)
         shell: pwsh
         run: |
           function Register-Dia($dlls) {
@@ -173,34 +173,20 @@ jobs:
             }
           }
 
+          # Try to locate msdia140.dll in common Visual Studio locations present on hosted runners
           $search = @(
             "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\*\DIA SDK\bin\amd64\msdia140.dll",
             "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\*\Common7\IDE\msdia140.dll",
             "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\*\Common7\Packages\Debugger\msdia140.dll",
-            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2022\*\Team Tools\Dynamic Code Coverage Tools\amd64\msdia140.dll",
-            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2019\*\DIA SDK\bin\amd64\msdia140.dll",
-            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2019\*\Common7\IDE\msdia140.dll",
-            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2019\*\Common7\Packages\Debugger\msdia140.dll"
+            "$Env:ProgramFiles(x86)\Microsoft Visual Studio\2019\*\DIA SDK\bin\amd64\msdia140.dll"
           )
           $found = @()
           foreach ($pat in $search) { $found += Get-ChildItem -Path $pat -ErrorAction SilentlyContinue }
 
-          if (-not $found) {
-            Write-Warning "msdia140.dll not found; installing Visual Studio Build Tools (VCTools workload) to obtain DIA SDK..."
-            $bt = Join-Path $env:RUNNER_TEMP 'vs_BuildTools.exe'
-            Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vs_BuildTools.exe' -OutFile $bt -UseBasicParsing
-            & $bt --quiet --wait --norestart --nocache \
-              --add Microsoft.VisualStudio.Workload.VCTools \
-              --add Microsoft.VisualStudio.Component.VC.140 \
-              --includeRecommended
-            # Re-scan after install
-            foreach ($pat in $search) { $found += Get-ChildItem -Path $pat -ErrorAction SilentlyContinue }
-          }
-
           if ($found) {
             Register-Dia ($found | Select-Object -ExpandProperty FullName -Unique)
           } else {
-            Write-Error 'Failed to locate msdia140.dll even after attempting Build Tools install.'
+            Write-Warning 'msdia140.dll not found. Proceeding without DIA; DbgHelp path remains primary.'
           }
 
       - name: Build library (triggers generation)
