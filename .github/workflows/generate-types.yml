@@ -125,7 +125,8 @@ jobs:
     runs-on: windows-latest
     needs: [version, test]
     permissions:
-      contents: read
+      contents: write
+      pull-requests: write
     outputs:
       version: ${{ steps.out.outputs.version }}
       changed: ${{ steps.out.outputs.changed }}
@@ -223,8 +224,8 @@ jobs:
           if ($latest -ne '0.0.0') {
             $nupkgUrl = "https://api.nuget.org/v3-flatcontainer/$pkg/$latest/$pkg.$latest.nupkg"
             $nupkg = Join-Path $env:RUNNER_TEMP 'prev.nupkg'
-            try {
-              Invoke-WebRequest $nupkgUrl -OutFile $nupkg -UseBasicParsing
+          try {
+            Invoke-WebRequest $nupkgUrl -OutFile $nupkg
               $extract = Join-Path $env:RUNNER_TEMP 'prev'
               Expand-Archive -Path $nupkg -DestinationPath $extract -Force
               $prevDll = Get-ChildItem -Path (Join-Path $extract 'lib') -Recurse -Filter 'ntoskrnlib.dll' | Select-Object -First 1 | ForEach-Object { $_.FullName }
@@ -249,7 +250,7 @@ jobs:
             dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=$final /p:WindowsVersionLabel=${{ env.WINVER_LABEL }}
           }
 
-          $idx = Invoke-RestMethod -UseBasicParsing -Uri ("https://api.nuget.org/v3-flatcontainer/$pkg/index.json")
+          $idx = Invoke-RestMethod -Uri ("https://api.nuget.org/v3-flatcontainer/$pkg/index.json")
           $isNew = $true
           try { $isNew = -not [bool](@($idx.versions) -contains $final) } catch { $isNew = $true }
 
