@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using Microsoft.Extensions.Logging;
 using ntoskrnlib.Interop;
 
 namespace ntoskrnlib.Gen;
@@ -8,14 +9,16 @@ namespace ntoskrnlib.Gen;
 [System.Runtime.Versioning.SupportedOSPlatform("windows")]
 internal sealed class UdtEmitter
 {
+    private readonly ILogger<UdtEmitter> _logger;
     private readonly TypeInspector _insp;
     private readonly CodeGenerator _gen;
     private readonly DynamicWrapperGenerator? _dyn;
     private readonly string? _ns;
     private readonly string? _moduleSym;
 
-    public UdtEmitter(TypeInspector insp, CodeGenerator gen, DynamicWrapperGenerator? dyn = null, string? @namespace = null, string? moduleSymbolPrefix = null)
+    public UdtEmitter(ILogger<UdtEmitter> logger, TypeInspector insp, CodeGenerator gen, DynamicWrapperGenerator? dyn = null, string? @namespace = null, string? moduleSymbolPrefix = null)
     {
+        _logger = logger;
         _insp = insp;
         _gen = gen;
         _dyn = dyn;
@@ -25,6 +28,9 @@ internal sealed class UdtEmitter
 
     public int GenerateWithDependencies(uint rootTypeId, string outputDir, bool flatten)
     {
+        var rootName = _insp.GetTypeName(rootTypeId);
+        _logger.LogInformation("Starting generation for root type {name} ({id}) into {dir}", rootName, rootTypeId, outputDir);
+
         var queue = new Queue<uint>();
         var seen = new HashSet<uint>();
         queue.Enqueue(rootTypeId);
@@ -35,13 +41,20 @@ internal sealed class UdtEmitter
             if (!seen.Add(typeId)) continue;
             var name = _insp.GetTypeName(typeId);
 
+            _logger.LogDebug("Emitting type {name} ({id})", name, typeId);
+
             // Generate explicit layout struct
             var code = _gen.GenerateUdt(typeId);
             var fileName = Path.Combine(outputDir, TypeSpec.SanitizeIdentifier(name) + ".g.cs");
             if (!File.Exists(fileName))
             {
                 File.WriteAllText(fileName, code);
+                _logger.LogDebug("Wrote struct {name} to {file}", name, fileName);
                 written++;
+            }
+            else
+            {
+                _logger.LogTrace("Struct file already existed for {name}; skipping write", name);
             }
 
             // Generate class-based structure using Structure namespace
@@ -55,11 +68,16 @@ internal sealed class UdtEmitter
                 if (!File.Exists(classFile))
                 {
                     File.WriteAllText(classFile, classCode);
+                    _logger.LogDebug("Wrote managed wrapper {className} to {file}", className, classFile);
+                }
+                else
+                {
+                    _logger.LogTrace("Managed wrapper already existed for {className}; skipping write", className);
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[WARNING] Failed to generate managed class for {name}: {ex.Message}");
+                _logger.LogWarning(ex, "Failed to generate managed class for {name}", name);
             }
 
             if (_dyn != null && _ns != null && _moduleSym != null)
@@ -71,6 +89,11 @@ internal sealed class UdtEmitter
                 if (!File.Exists(dfile))
                 {
                     File.WriteAllText(dfile, dcode);
+                    _logger.LogDebug("Wrote dynamic wrapper for {name} to {file}", name, dfile);
+                }
+                else
+                {
+                    _logger.LogTrace("Dynamic wrapper already existed for {name}; skipping write", name);
                 }
             }
 
@@ -81,11 +104,13 @@ internal sealed class UdtEmitter
                     var ts = _insp.ResolveType(f.TypeId);
                     if (ts.TryAsUdt(out _, out _))
                     {
+                        _logger.LogTrace("Queueing dependency {dep} ({id})", _insp.GetTypeName(f.TypeId), f.TypeId);
                         queue.Enqueue(f.TypeId);
                     }
                 }
             }
         }
+        _logger.LogInformation("Finished generation for root type {name}; {count} struct file(s) written", rootName, written);
         return written;
     }
 }
