@@ -48,7 +48,10 @@ internal sealed class GenerationRunner : IGenerationRunner
 
         Directory.CreateDirectory(opts.Output);
 
-        using var session = _sessionFactory.Create(opts.Module);
+        var symbolPath = SymbolSession.BuildDefaultSymbolPath();
+        SymbolDownloader.EnsureSymbolsAvailable(opts.Module, symbolPath, _log);
+
+        using var session = _sessionFactory.Create(opts.Module, symbolPath);
         var insp = new TypeInspector(session);
         var versionId = NormalizeVersionLabel(opts.VersionLabel);
         if (string.IsNullOrWhiteSpace(versionId))
@@ -90,7 +93,7 @@ internal sealed class GenerationRunner : IGenerationRunner
 
             if (!usedDbgHelp)
             {
-                var dia = _diaFactory.TryCreate(opts.Module, SymbolSession.BuildDefaultSymbolPath());
+                var dia = _diaFactory.TryCreate(opts.Module, symbolPath);
                 if (dia != null)
                 {
                     var emitterDia = new DiaEmitter(dia, ns);
@@ -115,7 +118,7 @@ internal sealed class GenerationRunner : IGenerationRunner
                 if (!insp.TryGetTypeIdByName(name, out var typeId))
                 {
                     _log.LogWarning("Type not found via DbgHelp: {name}; trying DIA...", name);
-                    var dia = _diaFactory.TryCreate(opts.Module, SymbolSession.BuildDefaultSymbolPath());
+                    var dia = _diaFactory.TryCreate(opts.Module, symbolPath);
                     if (dia == null)
                     {
                         _log.LogError("DIA not available; cannot resolve {name}", name);
@@ -205,6 +208,7 @@ internal sealed class GenerationRunner : IGenerationRunner
             return 2;
         }
         int total = 0;
+        var symbolPath = SymbolSession.BuildDefaultSymbolPath();
 
         // If multi-version is provided, iterate each and generate into its own subdir/namespace
         if (root.Versions != null && root.Versions.Count > 0)
@@ -212,7 +216,7 @@ internal sealed class GenerationRunner : IGenerationRunner
             foreach (var v in root.Versions)
             {
                 var versionId = NormalizeVersionLabel(v.Label);
-                total += RunOneConfigTypesSet(v.Types, output, versionId);
+                total += RunOneConfigTypesSet(v.Types, output, versionId, symbolPath);
             }
             _log.LogInformation("Generated {count} file(s) into '{output}'", total, output);
             return 0;
@@ -224,12 +228,12 @@ internal sealed class GenerationRunner : IGenerationRunner
             singleVersionId = DetectWindowsVersionLabel();
         // Clean per-version root once before generating all entries for this version
         TryCleanDirectory(Path.Combine(output, singleVersionId));
-        total += RunOneConfigTypesSet(root.Types, output, singleVersionId);
+        total += RunOneConfigTypesSet(root.Types, output, singleVersionId, symbolPath);
         _log.LogInformation("Generated {count} file(s) into '{output}'", total, output);
         return 0;
     }
 
-    private int RunOneConfigTypesSet(List<ConfigEntry> entries, string output, string versionId)
+    private int RunOneConfigTypesSet(List<ConfigEntry> entries, string output, string versionId, string symbolPath)
     {
         if (entries == null)
             return 0;
@@ -237,7 +241,8 @@ internal sealed class GenerationRunner : IGenerationRunner
         foreach (var ce in entries)
         {
             var module = ce.Module.Replace("ntoskrnlib_placeholder.exe", "ntoskrnl.exe");
-            using var session = _sessionFactory.Create(module);
+            SymbolDownloader.EnsureSymbolsAvailable(module, symbolPath, _log);
+            using var session = _sessionFactory.Create(module, symbolPath);
             var insp = new TypeInspector(session);
             var (moduleId, ns) = DeriveModuleInfo(module, versionId);
             var gen = _codeGenFactory.Create(insp, ce.Flatten, ns);
@@ -274,7 +279,7 @@ internal sealed class GenerationRunner : IGenerationRunner
 
                 if (!usedDbgHelp)
                 {
-                    var dia = _diaFactory.TryCreate(module, SymbolSession.BuildDefaultSymbolPath());
+                    var dia = _diaFactory.TryCreate(module, symbolPath);
                     if (dia != null)
                     {
                         var emitterDia = new DiaEmitter(dia, ns, moduleSym);
@@ -302,7 +307,7 @@ internal sealed class GenerationRunner : IGenerationRunner
 
                 // Fallback to DIA like the direct CLI path
                 _log.LogWarning("Type not found via DbgHelp: {name}; trying DIA...", name);
-                var dia = _diaFactory.TryCreate(module, SymbolSession.BuildDefaultSymbolPath());
+                var dia = _diaFactory.TryCreate(module, symbolPath);
                 if (dia == null)
                 {
                     _log.LogError("DIA not available; cannot resolve {name}", name);
