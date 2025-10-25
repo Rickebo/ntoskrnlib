@@ -43,20 +43,35 @@ internal sealed class GenerationRunner : IGenerationRunner
 
     public int Run(GenerationOptions opts)
     {
-        if (!string.IsNullOrEmpty(opts.ConfigPath))
-            return RunFromConfig(opts.ConfigPath!, opts.Output, opts.VersionLabel);
+        _log.LogInformation("Starting generation workflow");
+        _log.LogDebug("Resolved options: {options}", DescribeOptions(opts));
 
+        if (!string.IsNullOrEmpty(opts.ConfigPath))
+        {
+            _log.LogInformation("Running generation from configuration file {config}", opts.ConfigPath);
+            return RunFromConfig(opts.ConfigPath!, opts.Output, opts.VersionLabel);
+        }
+
+        _log.LogInformation("Ensuring output root exists at {output}", opts.Output);
         Directory.CreateDirectory(opts.Output);
 
         var symbolPath = SymbolSession.BuildDefaultSymbolPath();
-        SymbolDownloader.EnsureSymbolsAvailable(opts.Module, symbolPath, _log);
+        _log.LogDebug("Using symbol search path: {path}", symbolPath);
+        var symbolPrefetched = SymbolDownloader.EnsureSymbolsAvailable(opts.Module, symbolPath, _log);
+        _log.LogDebug("Symbol prefetch status for {module}: {status}", opts.Module, symbolPrefetched ? "downloaded" : "cached/skip");
 
+        _log.LogInformation("Opening symbol session for {module}", opts.Module);
         using var session = _sessionFactory.Create(opts.Module, symbolPath);
         var insp = new TypeInspector(session);
         var versionId = NormalizeVersionLabel(opts.VersionLabel);
         if (string.IsNullOrWhiteSpace(versionId))
+        {
+            _log.LogInformation("No version label provided; attempting to detect from host OS");
             versionId = DetectWindowsVersionLabel();
+        }
+        _log.LogInformation("Using version label {version}", versionId);
         var (moduleId, ns) = DeriveModuleInfo(opts.Module, versionId);
+        _log.LogInformation("Derived module info: moduleId={moduleId}, namespace={namespace}", moduleId, ns);
         var gen = _codeGenFactory.Create(insp, opts.Flatten, ns);
         DynamicWrapperGenerator? dyn = opts.EmitDynamic ? new DynamicWrapperGenerator(insp) : null;
         string moduleSym = moduleId; // simple prefix; DbgHelp often aliases 'nt' but this is for metadata only
@@ -64,14 +79,16 @@ internal sealed class GenerationRunner : IGenerationRunner
         var outRoot = opts.Output;
         var versionDir = Path.Combine(outRoot, versionId);
         // Clean current version directory to avoid stale files without touching other versions
+        _log.LogDebug("Cleaning version-specific output at {dir}", versionDir);
         TryCleanDirectory(versionDir);
         var outDir = Path.Combine(versionDir, moduleId);
+        _log.LogInformation("Emitting files to {dir}", outDir);
         Directory.CreateDirectory(outDir);
 
         var targets = new List<(uint typeId, string name)>();
         if (opts.All)
         {
-            _log.LogInformation("Enumerating UDTs from {module}", opts.Module);
+            _log.LogInformation("Enumerating all UDTs from {module}", opts.Module);
             bool usedDbgHelp = false;
             try
             {
@@ -79,6 +96,7 @@ internal sealed class GenerationRunner : IGenerationRunner
                 if (udts.Count > 0)
                 {
                     targets.AddRange(udts);
+                    _log.LogInformation("Queued {count} UDTs for generation via DbgHelp", udts.Count);
                     usedDbgHelp = true;
                 }
                 else
@@ -112,6 +130,7 @@ internal sealed class GenerationRunner : IGenerationRunner
         }
         else
         {
+            _log.LogInformation("Resolving {count} requested type(s) for generation", opts.Types.Count);
             foreach (var t in opts.Types)
             {
                 var name = t;
@@ -144,14 +163,22 @@ internal sealed class GenerationRunner : IGenerationRunner
                     continue;
                 }
                 targets.Add((typeId, name));
+                _log.LogDebug("Queued {name} ({id}) for emission", name, typeId);
             }
         }
 
+        if (targets.Count == 0 && !opts.All)
+        {
+            _log.LogWarning("No UDTs resolved via DbgHelp; ensure requested types exist or rely on DIA fallback logs above");
+        }
+
         int written = 0;
+        _log.LogInformation("Starting emission for {count} target type(s)", targets.Count);
         foreach (var (typeId, name) in targets)
         {
             try
             {
+                _log.LogDebug("Generating files for {name} ({id})", name, typeId);
                 written += emitter.GenerateWithDependencies(typeId, outDir, opts.Flatten);
             }
             catch (Exception ex)
@@ -199,6 +226,7 @@ internal sealed class GenerationRunner : IGenerationRunner
 
     private int RunFromConfig(string configPath, string output, string? cliVersionLabel)
     {
+        _log.LogInformation("Reading generation configuration from {config}", configPath);
         var yaml = File.ReadAllText(configPath);
         var y = new DeserializerBuilder().IgnoreUnmatchedProperties().Build();
         var root = y.Deserialize<ConfigRoot>(yaml);
@@ -207,8 +235,10 @@ internal sealed class GenerationRunner : IGenerationRunner
             _log.LogError("Invalid config: 'types' not found");
             return 2;
         }
+        _log.LogDebug("Configuration loaded with {count} top-level type entries", root.Types?.Count ?? 0);
         int total = 0;
         var symbolPath = SymbolSession.BuildDefaultSymbolPath();
+        _log.LogDebug("Using symbol search path: {path}", symbolPath);
 
         // If multi-version is provided, iterate each and generate into its own subdir/namespace
         if (root.Versions != null && root.Versions.Count > 0)
@@ -216,6 +246,7 @@ internal sealed class GenerationRunner : IGenerationRunner
             foreach (var v in root.Versions)
             {
                 var versionId = NormalizeVersionLabel(v.Label);
+                _log.LogInformation("Processing configuration block for version {version}", versionId);
                 total += RunOneConfigTypesSet(v.Types, output, versionId, symbolPath);
             }
             _log.LogInformation("Generated {count} file(s) into '{output}'", total, output);
@@ -227,6 +258,7 @@ internal sealed class GenerationRunner : IGenerationRunner
         if (string.IsNullOrWhiteSpace(singleVersionId))
             singleVersionId = DetectWindowsVersionLabel();
         // Clean per-version root once before generating all entries for this version
+        _log.LogDebug("Cleaning configuration output for version {version} at {dir}", singleVersionId, Path.Combine(output, singleVersionId));
         TryCleanDirectory(Path.Combine(output, singleVersionId));
         total += RunOneConfigTypesSet(root.Types, output, singleVersionId, symbolPath);
         _log.LogInformation("Generated {count} file(s) into '{output}'", total, output);
@@ -238,22 +270,27 @@ internal sealed class GenerationRunner : IGenerationRunner
         if (entries == null)
             return 0;
         int total = 0;
+        _log.LogInformation("Starting configuration-driven generation for version {version} with {count} module entry(ies)", versionId, entries.Count);
         foreach (var ce in entries)
         {
             var module = ce.Module.Replace("ntoskrnlib_placeholder.exe", "ntoskrnl.exe");
+            _log.LogInformation("Ensuring symbols and session for module {module} (all={all}, flatten={flatten})", module, ce.All, ce.Flatten);
             SymbolDownloader.EnsureSymbolsAvailable(module, symbolPath, _log);
             using var session = _sessionFactory.Create(module, symbolPath);
             var insp = new TypeInspector(session);
             var (moduleId, ns) = DeriveModuleInfo(module, versionId);
+            _log.LogDebug("Derived module info for config entry: moduleId={moduleId}, namespace={namespace}", moduleId, ns);
             var gen = _codeGenFactory.Create(insp, ce.Flatten, ns);
             DynamicWrapperGenerator? dyn = new DynamicWrapperGenerator(insp);
             string moduleSym = moduleId;
             var emitter = _emitterFactory.Create(insp, gen, dyn, ns, moduleSym);
             var outDir = Path.Combine(output, versionId, moduleId);
+            _log.LogInformation("Emitting configuration output for module {module} into {dir}", module, outDir);
             Directory.CreateDirectory(outDir);
 
             if (ce.All)
             {
+                _log.LogInformation("Configuration requests all UDTs for module {module}", module);
                 bool usedDbgHelp = false;
                 try
                 {
@@ -265,6 +302,7 @@ internal sealed class GenerationRunner : IGenerationRunner
                             try { total += emitter.GenerateWithDependencies(typeId, outDir, ce.Flatten); }
                             catch (Exception ex) { _log.LogWarning(ex, "Failed generating {name}", name); }
                         }
+                        _log.LogInformation("DbgHelp emitted {count} UDT(s) for module {module}", udts.Count, module);
                         usedDbgHelp = true;
                     }
                     else
@@ -283,11 +321,13 @@ internal sealed class GenerationRunner : IGenerationRunner
                     if (dia != null)
                     {
                         var emitterDia = new DiaEmitter(dia, ns, moduleSym);
+                        int emittedViaDia = 0;
                         foreach (var name in dia.EnumerateUdts())
                         {
-                            try { total += emitterDia.GenerateWithDependencies(name, outDir, ce.Flatten); }
+                            try { total += emitterDia.GenerateWithDependencies(name, outDir, ce.Flatten); emittedViaDia++; }
                             catch (Exception genEx) { _log.LogWarning(genEx, "Failed generating {name} via DIA", name); }
                         }
+                        _log.LogInformation("DIA emitted {count} UDT(s) for module {module}", emittedViaDia, module);
                     }
                     else
                     {
@@ -297,10 +337,12 @@ internal sealed class GenerationRunner : IGenerationRunner
                 continue;
             }
 
+            _log.LogInformation("Configuration requests {count} specific type(s) for module {module}", ce.Names.Count, module);
             foreach (var name in ce.Names)
             {
                 if (insp.TryGetTypeIdByName(name, out var typeId))
                 {
+                    _log.LogDebug("Config entry resolved {name} ({id}) via DbgHelp", name, typeId);
                     total += emitter.GenerateWithDependencies(typeId, outDir, ce.Flatten);
                     continue;
                 }
@@ -336,6 +378,7 @@ internal sealed class GenerationRunner : IGenerationRunner
         }
 
         // Generate registry file for managed classes
+        _log.LogInformation("Generating structure registry for version {version}", versionId);
         GenerateStructureRegistry(output, versionId);
 
         return total;
@@ -347,15 +390,28 @@ internal sealed class GenerationRunner : IGenerationRunner
         {
             // Find all Managed directories
             var versionDir = Path.Combine(output, versionId);
-            if (!Directory.Exists(versionDir)) return;
+            _log.LogDebug("Scanning for managed types under {dir}", versionDir);
+            if (!Directory.Exists(versionDir))
+            {
+                _log.LogDebug("Version directory {dir} not found; skipping structure registry", versionDir);
+                return;
+            }
 
             var managedDirs = Directory.GetDirectories(versionDir, "Managed", SearchOption.AllDirectories);
-            if (managedDirs.Length == 0) return;
+            if (managedDirs.Length == 0)
+            {
+                _log.LogDebug("No Managed directories found beneath {dir}; skipping structure registry", versionDir);
+                return;
+            }
 
             foreach (var managedDir in managedDirs)
             {
                 var classFiles = Directory.GetFiles(managedDir, "*.g.cs");
-                if (classFiles.Length == 0) continue;
+                if (classFiles.Length == 0)
+                {
+                    _log.LogTrace("No managed class files found in {dir}; skipping", managedDir);
+                    continue;
+                }
 
                 // Extract class names from filenames (remove .g.cs extension)
                 var classNames = classFiles
@@ -422,6 +478,12 @@ internal sealed class GenerationRunner : IGenerationRunner
         {
             _log.LogWarning(ex, "Failed to generate structure registry");
         }
+    }
+
+    private static string DescribeOptions(GenerationOptions opts)
+    {
+        var typeSummary = (opts.Types?.Count ?? 0) == 0 ? "(none)" : string.Join(", ", opts.Types);
+        return $"Module={opts.Module}, Output={opts.Output}, Config={opts.ConfigPath ?? "(none)"}, VersionLabel={opts.VersionLabel ?? "(auto)"}, Flatten={opts.Flatten}, All={opts.All}, Types={typeSummary}, IncludeDeps={opts.Deps}, EmitDynamic={opts.EmitDynamic}";
     }
 
     private static string NormalizeVersionLabel(string? label)
