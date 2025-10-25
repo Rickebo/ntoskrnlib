@@ -96,7 +96,14 @@ internal sealed class DiaInspector : IDisposable
             catch { break; }
             if (s == null) continue;
             var n = s.name;
-            if (!string.IsNullOrEmpty(n)) yield return n!;
+            // Skip invalid or unnamed types (e.g., <unnamed-tag>, <unnamed-type-*>, <lambda_*>, etc.)
+            if (string.IsNullOrWhiteSpace(n) ||
+                n.StartsWith("<") ||
+                n.StartsWith("__unnamed", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            yield return n!;
         }
     }
 

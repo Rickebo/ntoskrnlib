@@ -125,6 +125,28 @@ namespace ntoskrnlib.Structure
                             "Could not resolve offsets of property " + property.Name + " from " + type + ".");
 
                 info.OffsetDictionary.Add(property.Name, offsets);
+
+                // Read Length attribute if present
+                var lengthAttribute = property.GetCustomAttribute<Length>();
+                if (lengthAttribute != null)
+                {
+                    info.LengthDictionary.Add(property.Name, lengthAttribute.Value);
+                }
+
+                // Build PropertyMetadata for optimized WriteStructure
+                var propertyType = property.PropertyType;
+                var metadata = new PropertyMetadata
+                {
+                    Name = property.Name,
+                    Offsets = offsets,
+                    Length = lengthAttribute?.Value ?? 0,
+                    IsValueType = propertyType.IsValueType,
+                    IsDynamicStructure = typeof(DynamicStructure).IsAssignableFrom(propertyType),
+                    Getter = property.GetValue,
+                    ValueWriter = CreateValueWriter(propertyType),
+                    PropertyType = propertyType
+                };
+                info.Properties.Add(metadata);
             }
 
             SetInfo<T>(info);
@@ -211,6 +233,22 @@ namespace ntoskrnlib.Structure
             return null;
         }
 
+        private static Action<IMemorySource, MemoryPointer, object> CreateValueWriter(Type propertyType)
+        {
+            if (!propertyType.IsValueType)
+                return null;
+
+            // Use reflection once during registration to create a strongly-typed delegate
+            var writeMethod = typeof(IMemorySource)
+                .GetMethod("Write")
+                .MakeGenericMethod(propertyType);
+
+            return (memory, address, value) =>
+            {
+                writeMethod.Invoke(memory, new object[] { address, value });
+            };
+        }
+
         protected void WriteHere<T>(T value, ulong offset = 0) where T : struct =>
             WriteHere(new ulong[] { 0 }, value, offset);
 
@@ -260,8 +298,19 @@ namespace ntoskrnlib.Structure
         protected T Read<T>(ulong[] offsets) where T : struct => 
                 Memory.Read<T>(Dereference(offsets));
 
-        protected T ReadStructure<T>(string propertyName) where T : DynamicStructure =>
-                ReadStructure<T>(StructureInfo.GetOffsets(propertyName));
+        protected T ReadStructure<T>(string propertyName) where T : DynamicStructure
+        {
+            var structure = ReadStructure<T>(StructureInfo.GetOffsets(propertyName));
+
+            // If reading a DynamicArray, set its length from the Length attribute
+            if (structure is DynamicArray array)
+            {
+                var length = StructureInfo.GetLength(propertyName);
+                array.Length = length;
+            }
+
+            return structure;
+        }
         
         protected T ReadStructure<T>(ulong[] offsets) where T : DynamicStructure
         {
@@ -295,11 +344,87 @@ namespace ntoskrnlib.Structure
         protected T ReadStructure<T>(uint offset) where T : DynamicStructure =>
                 Memory.ReadStructure<T>(BaseAddress + offset);
 
+        protected T ReadStructure<T>(ulong offset) where T : DynamicStructure =>
+                Memory.ReadStructure<T>(BaseAddress + offset);
+
+        protected void WriteStructure<T>(string propertyName, T value) where T : DynamicStructure
+        {
+            var offsets = StructureInfo.GetOffsets(propertyName);
+            WriteStructure(offsets, value);
+        }
+
+        protected void WriteStructure<T>(ulong[] offsets, T value) where T : DynamicStructure
+        {
+            if (offsets.Length < 1)
+                throw new ArgumentException("At least one offset must be specified in order to write.", nameof(offsets));
+
+            if (value == null)
+                throw new ArgumentNullException(nameof(value));
+
+            var targetAddress = Dereference(offsets, finalDereference: false);
+
+            // Get the type info for T - this now contains cached PropertyMetadata
+            var structureInfo = GetInfo(typeof(T));
+            if (structureInfo == null)
+                throw new InvalidOperationException($"Type {typeof(T).FullName} is not registered.");
+
+            // Use cached PropertyMetadata to avoid reflection at runtime
+            foreach (var propertyMetadata in structureInfo.Properties)
+            {
+                if (propertyMetadata.Offsets.Length != 1)
+                    continue; // Skip multi-level offsets
+
+                var propertyValue = propertyMetadata.Getter(value);
+                if (propertyValue == null)
+                    continue;
+
+                // Write value types (structs, primitives) using pre-compiled delegate
+                if (propertyMetadata.IsValueType)
+                {
+                    propertyMetadata.ValueWriter(Memory, targetAddress + propertyMetadata.Offsets[0], propertyValue);
+                }
+                // Recursively write DynamicStructure properties (deep write)
+                else if (propertyMetadata.IsDynamicStructure)
+                {
+                    var nestedStructure = propertyValue as DynamicStructure;
+                    if (nestedStructure != null)
+                    {
+                        // Recursively write nested structure using reflection for the generic method call
+                        // (This reflection is unavoidable without code generation, but happens once per nested structure)
+                        var writeStructureMethod = typeof(DynamicStructure)
+                            .GetMethods(BindingFlags.NonPublic | BindingFlags.Instance)
+                            .Where(m => m.Name == "WriteStructure" && m.IsGenericMethod)
+                            .FirstOrDefault(m => m.GetParameters().Length == 2 && m.GetParameters()[0].ParameterType == typeof(ulong[]))
+                            ?.MakeGenericMethod(propertyMetadata.PropertyType);
+
+                        if (writeStructureMethod != null)
+                        {
+                            writeStructureMethod.Invoke(this, new object[] { new ulong[] { propertyMetadata.Offsets[0] }, nestedStructure });
+                        }
+                    }
+                }
+            }
+        }
+
+        private class PropertyMetadata
+        {
+            public string Name { get; set; }
+            public ulong[] Offsets { get; set; }
+            public int Length { get; set; }
+            public bool IsValueType { get; set; }
+            public bool IsDynamicStructure { get; set; }
+            public Type PropertyType { get; set; }
+            public Func<object, object> Getter { get; set; }
+            public Action<IMemorySource, MemoryPointer, object> ValueWriter { get; set; }
+        }
+
         private class DynamicStructureInfo
         {
             private readonly Type _type;
             public object Constructor { get; set; }
             public Dictionary<string, ulong[]> OffsetDictionary { get; } = new Dictionary<string, ulong[]>();
+            public Dictionary<string, int> LengthDictionary { get; } = new Dictionary<string, int>();
+            public List<PropertyMetadata> Properties { get; } = new List<PropertyMetadata>();
 
             public DynamicStructureInfo(Type type)
             {
@@ -319,6 +444,9 @@ namespace ntoskrnlib.Structure
 
             public ulong[] GetOffsets(string propertyName) =>
                     OffsetDictionary[propertyName];
+
+            public int GetLength(string propertyName) =>
+                    LengthDictionary.TryGetValue(propertyName, out var length) ? length : 0;
         }
     }
 }

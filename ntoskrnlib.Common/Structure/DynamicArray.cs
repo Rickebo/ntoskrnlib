@@ -10,10 +10,17 @@ namespace ntoskrnlib.Structure
     {
         private Type _lastType;
         private int _lastTypeSize;
+        private int _length;
 
         public DynamicArray(IMemorySource memory, MemoryPointer baseAddress) : base(memory, baseAddress)
         {
+            _length = 0;
+        }
 
+        public int Length
+        {
+            get => _length;
+            internal set => _length = value;
         }
 
         [RegisterMethod]
@@ -21,6 +28,12 @@ namespace ntoskrnlib.Structure
 
         public T Get<T>(int index) where T : struct
         {
+            if (_length > 0 && index >= _length)
+                throw new IndexOutOfRangeException($"Index {index} is out of range for array of length {_length}");
+
+            if (index < 0)
+                throw new IndexOutOfRangeException($"Index {index} cannot be negative");
+
             var size = typeof(T) == _lastType
                 ? _lastTypeSize
                 : typeof(T).IsEnum
@@ -36,6 +49,12 @@ namespace ntoskrnlib.Structure
         public T[] GetRange<T>(int length)
             where T : struct
         {
+            if (length < 0)
+                throw new ArgumentOutOfRangeException(nameof(length), "Length cannot be negative");
+
+            if (_length > 0 && length > _length)
+                throw new ArgumentOutOfRangeException(nameof(length), $"Requested length {length} exceeds array length {_length}");
+
             var size = typeof(T) == _lastType
                 ? _lastTypeSize
                 : typeof(T).IsEnum
@@ -54,6 +73,12 @@ namespace ntoskrnlib.Structure
 
         public void Set<T>(T value, int index) where T : struct
         {
+            if (_length > 0 && index >= _length)
+                throw new IndexOutOfRangeException($"Index {index} is out of range for array of length {_length}");
+
+            if (index < 0)
+                throw new IndexOutOfRangeException($"Index {index} cannot be negative");
+
             var size = typeof(T) == _lastType
                 ? _lastTypeSize
                 : typeof(T).IsEnum

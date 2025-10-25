@@ -39,8 +39,23 @@ internal sealed class DiaEmitter
             var typeName = sym.name ?? disp;
             if (!seen.Add(typeName)) continue;
 
+            // Skip invalid or unnamed types (e.g., <unnamed-tag>, <unnamed-type-*>)
+            if (string.IsNullOrWhiteSpace(typeName) ||
+                typeName.StartsWith("<") ||
+                typeName.StartsWith("__unnamed", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            // Skip if sanitized name is empty or only underscores/whitespace
+            var sanitizedName = ProgramHelpers.Sanitize(typeName);
+            if (string.IsNullOrWhiteSpace(sanitizedName) || sanitizedName.All(c => c == '_'))
+            {
+                continue;
+            }
+
             var code = ProgramHelpers.GenerateFromDia(typeName, _dia, sym, flatten, _ns);
-            var file = Path.Combine(outputDir, ProgramHelpers.Sanitize(typeName) + ".g.cs");
+            var file = Path.Combine(outputDir, sanitizedName + ".g.cs");
             if (!File.Exists(file))
             {
                 File.WriteAllText(file, code);
@@ -50,14 +65,22 @@ internal sealed class DiaEmitter
             // Generate managed class
             try
             {
-                var managedCode = GenerateManagedClass(typeName, sym, flatten);
                 var className = CodeGenerator.ToCSharpClassName(typeName);
-                var managedDir = Path.Combine(outputDir, "Managed");
-                Directory.CreateDirectory(managedDir);
-                var managedFile = Path.Combine(managedDir, className + ".managed.g.cs");
-                if (!File.Exists(managedFile))
+                // Validate class name
+                if (string.IsNullOrWhiteSpace(className) || className.All(c => c == '_'))
                 {
-                    File.WriteAllText(managedFile, managedCode);
+                    Console.WriteLine($"[WARNING] Skipping managed class generation for {typeName}: invalid class name");
+                }
+                else
+                {
+                    var managedCode = GenerateManagedClass(typeName, sym, flatten);
+                    var managedDir = Path.Combine(outputDir, "Managed");
+                    Directory.CreateDirectory(managedDir);
+                    var managedFile = Path.Combine(managedDir, className + ".managed.g.cs");
+                    if (!File.Exists(managedFile))
+                    {
+                        File.WriteAllText(managedFile, managedCode);
+                    }
                 }
             }
             catch (Exception ex)
@@ -120,8 +143,28 @@ internal sealed class DiaEmitter
         {
             var sanitizedFieldName = ProgramHelpers.Sanitize(fieldName);
 
-            // Determine property type
-            var csType = DetermineCSharpType(fieldType, flatten);
+            // Skip fields with invalid names
+            if (string.IsNullOrWhiteSpace(fieldName) ||
+                fieldName.StartsWith("<") ||
+                fieldName.StartsWith("__unnamed", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            // Determine property type (use managed class names for managed types)
+            var csType = DetermineCSharpType(fieldType, flatten, useManagedTypes: true);
+
+            // Skip fields with invalid type names (UDTs that reference unnamed types)
+            if (!flatten && IsInvalidTypeName(fieldType))
+            {
+                continue;
+            }
+
+            // Check if property name matches the enclosing type name
+            if (string.Equals(sanitizedFieldName, className, StringComparison.OrdinalIgnoreCase))
+            {
+                sanitizedFieldName = "Base" + sanitizedFieldName;
+            }
             TypeSyntax propType = csType.EndsWith("[]", StringComparison.Ordinal)
                 ? SyntaxFactory.ArrayType(
                     TypeFromName(csType.Substring(0, csType.Length - 2)))
@@ -140,21 +183,159 @@ internal sealed class DiaEmitter
                             SyntaxFactory.AttributeArgument(
                                 SyntaxFactory.ParseExpression($"{offset}UL")))));
 
-            var propDecl = SyntaxFactory.PropertyDeclaration(propType,
-                    SyntaxFactory.Identifier(sanitizedFieldName))
-                .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword))
-                .WithAccessorList(
-                    SyntaxFactory.AccessorList(
-                        SyntaxFactory.List(new[]
-                        {
-                            SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
-                                .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken)),
-                            SyntaxFactory.AccessorDeclaration(SyntaxKind.SetAccessorDeclaration)
-                                .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken))
-                        })))
-                .WithAttributeLists(SyntaxFactory.SingletonList(
-                    SyntaxFactory.AttributeList(
-                        SyntaxFactory.SingletonSeparatedList(offsetAttr))));
+            PropertyDeclarationSyntax propDecl;
+            var tag = (SymTagEnum)fieldType.symTag;
+
+            // Add Length attribute for arrays
+            var attributes = new List<AttributeListSyntax>
+            {
+                SyntaxFactory.AttributeList(SyntaxFactory.SingletonSeparatedList(offsetAttr))
+            };
+
+            if (tag == SymTagEnum.SymTagArrayType)
+            {
+                // Calculate array length
+                var arrayLength = fieldType.length;
+                var elemType = fieldType.type;
+                int elemSize = 1;
+                if (elemType != null)
+                {
+                    elemSize = (int)DiaInspector.GetTypeLength(elemType);
+                }
+                int arrayCount = elemSize > 0 ? (int)(arrayLength / (ulong)elemSize) : (int)arrayLength;
+
+                var lengthAttr = SyntaxFactory.Attribute(SyntaxFactory.IdentifierName("Length"))
+                    .WithArgumentList(
+                        SyntaxFactory.AttributeArgumentList(
+                            SyntaxFactory.SingletonSeparatedList(
+                                SyntaxFactory.AttributeArgument(
+                                    SyntaxFactory.LiteralExpression(
+                                        SyntaxKind.NumericLiteralExpression,
+                                        SyntaxFactory.Literal(arrayCount))))));
+                attributes.Add(SyntaxFactory.AttributeList(SyntaxFactory.SingletonSeparatedList(lengthAttr)));
+            }
+            else if (flatten && tag == SymTagEnum.SymTagUDT)
+            {
+                // For flattened UDTs, use the size in bytes as length
+                var udtLength = (int)fieldType.length;
+                var lengthAttr = SyntaxFactory.Attribute(SyntaxFactory.IdentifierName("Length"))
+                    .WithArgumentList(
+                        SyntaxFactory.AttributeArgumentList(
+                            SyntaxFactory.SingletonSeparatedList(
+                                SyntaxFactory.AttributeArgument(
+                                    SyntaxFactory.LiteralExpression(
+                                        SyntaxKind.NumericLiteralExpression,
+                                        SyntaxFactory.Literal(udtLength))))));
+                attributes.Add(SyntaxFactory.AttributeList(SyntaxFactory.SingletonSeparatedList(lengthAttr)));
+            }
+
+            // Determine if this is a managed UDT type or array (both use DynamicStructure)
+            bool isManagedUdt = (!flatten && tag == SymTagEnum.SymTagUDT) || tag == SymTagEnum.SymTagArrayType || (flatten && tag == SymTagEnum.SymTagUDT);
+
+            if (isManagedUdt)
+            {
+                // For managed class properties: use ReadStructure<T>(nameof(PropertyName)) and WriteStructure(nameof(PropertyName), value)
+                var getter = SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
+                    .WithExpressionBody(
+                        SyntaxFactory.ArrowExpressionClause(
+                            SyntaxFactory.InvocationExpression(
+                                SyntaxFactory.GenericName("ReadStructure")
+                                    .WithTypeArgumentList(
+                                        SyntaxFactory.TypeArgumentList(
+                                            SyntaxFactory.SingletonSeparatedList(propType))))
+                                .WithArgumentList(
+                                    SyntaxFactory.ArgumentList(
+                                        SyntaxFactory.SingletonSeparatedList(
+                                            SyntaxFactory.Argument(
+                                                SyntaxFactory.InvocationExpression(
+                                                    SyntaxFactory.IdentifierName("nameof"))
+                                                    .WithArgumentList(
+                                                        SyntaxFactory.ArgumentList(
+                                                            SyntaxFactory.SingletonSeparatedList(
+                                                                SyntaxFactory.Argument(
+                                                                    SyntaxFactory.IdentifierName(sanitizedFieldName)))))))))))
+                    .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
+
+                var setter = SyntaxFactory.AccessorDeclaration(SyntaxKind.SetAccessorDeclaration)
+                    .WithExpressionBody(
+                        SyntaxFactory.ArrowExpressionClause(
+                            SyntaxFactory.InvocationExpression(
+                                SyntaxFactory.IdentifierName("WriteStructure"))
+                                .WithArgumentList(
+                                    SyntaxFactory.ArgumentList(
+                                        SyntaxFactory.SeparatedList(new[]
+                                        {
+                                            SyntaxFactory.Argument(
+                                                SyntaxFactory.InvocationExpression(
+                                                    SyntaxFactory.IdentifierName("nameof"))
+                                                    .WithArgumentList(
+                                                        SyntaxFactory.ArgumentList(
+                                                            SyntaxFactory.SingletonSeparatedList(
+                                                                SyntaxFactory.Argument(
+                                                                    SyntaxFactory.IdentifierName(sanitizedFieldName)))))),
+                                            SyntaxFactory.Argument(SyntaxFactory.IdentifierName("value"))
+                                        })))))
+                    .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
+
+                propDecl = SyntaxFactory.PropertyDeclaration(propType, SyntaxFactory.Identifier(sanitizedFieldName))
+                    .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword))
+                    .WithAccessorList(
+                        SyntaxFactory.AccessorList(
+                            SyntaxFactory.List(new[] { getter, setter })))
+                    .WithAttributeLists(SyntaxFactory.List(attributes));
+            }
+            else
+            {
+                // For primitive types, structs, and arrays: use ReadHere<T>(nameof(PropertyName)) and WriteHere(nameof(PropertyName), value)
+                var getter = SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
+                    .WithExpressionBody(
+                        SyntaxFactory.ArrowExpressionClause(
+                            SyntaxFactory.InvocationExpression(
+                                SyntaxFactory.GenericName("ReadHere")
+                                    .WithTypeArgumentList(
+                                        SyntaxFactory.TypeArgumentList(
+                                            SyntaxFactory.SingletonSeparatedList(propType))))
+                                .WithArgumentList(
+                                    SyntaxFactory.ArgumentList(
+                                        SyntaxFactory.SingletonSeparatedList(
+                                            SyntaxFactory.Argument(
+                                                SyntaxFactory.InvocationExpression(
+                                                    SyntaxFactory.IdentifierName("nameof"))
+                                                    .WithArgumentList(
+                                                        SyntaxFactory.ArgumentList(
+                                                            SyntaxFactory.SingletonSeparatedList(
+                                                                SyntaxFactory.Argument(
+                                                                    SyntaxFactory.IdentifierName(sanitizedFieldName)))))))))))
+                    .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
+
+                var setter = SyntaxFactory.AccessorDeclaration(SyntaxKind.SetAccessorDeclaration)
+                    .WithExpressionBody(
+                        SyntaxFactory.ArrowExpressionClause(
+                            SyntaxFactory.InvocationExpression(
+                                SyntaxFactory.IdentifierName("WriteHere"))
+                                .WithArgumentList(
+                                    SyntaxFactory.ArgumentList(
+                                        SyntaxFactory.SeparatedList(new[]
+                                        {
+                                            SyntaxFactory.Argument(
+                                                SyntaxFactory.InvocationExpression(
+                                                    SyntaxFactory.IdentifierName("nameof"))
+                                                    .WithArgumentList(
+                                                        SyntaxFactory.ArgumentList(
+                                                            SyntaxFactory.SingletonSeparatedList(
+                                                                SyntaxFactory.Argument(
+                                                                    SyntaxFactory.IdentifierName(sanitizedFieldName)))))),
+                                            SyntaxFactory.Argument(SyntaxFactory.IdentifierName("value"))
+                                        })))))
+                    .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
+
+                propDecl = SyntaxFactory.PropertyDeclaration(propType, SyntaxFactory.Identifier(sanitizedFieldName))
+                    .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword))
+                    .WithAccessorList(
+                        SyntaxFactory.AccessorList(
+                            SyntaxFactory.List(new[] { getter, setter })))
+                    .WithAttributeLists(SyntaxFactory.List(attributes));
+            }
 
             classDecl = classDecl.AddMembers(propDecl);
         }
@@ -237,20 +418,14 @@ internal sealed class DiaEmitter
         };
     }
 
-    private static string DetermineCSharpType(IDiaSymbol fieldType, bool flatten)
+    private static string DetermineCSharpType(IDiaSymbol fieldType, bool flatten, bool useManagedTypes = false)
     {
         var tag = (SymTagEnum)fieldType.symTag;
 
-        // Handle arrays
+        // Handle arrays - use DynamicArray for managed types
         if (tag == SymTagEnum.SymTagArrayType)
         {
-            var elemType = fieldType.type;
-            if (elemType != null)
-            {
-                var elemTypeName = GetBasicTypeName(elemType);
-                return $"{elemTypeName}[]";
-            }
-            return "byte[]";
+            return "DynamicArray";
         }
 
         // Handle pointers
@@ -264,13 +439,20 @@ internal sealed class DiaEmitter
         {
             if (flatten)
             {
-                // Flatten as byte array
-                var size = fieldType.length;
-                return "byte[]";
+                // Flatten as DynamicArray
+                return "DynamicArray";
             }
             // Keep as structured type name
             var udtName = fieldType.name;
-            return ProgramHelpers.Sanitize(udtName ?? "UnknownType");
+            var sanitizedName = ProgramHelpers.Sanitize(udtName ?? "UnknownType");
+
+            // For managed types, convert to managed class name (PascalCase)
+            if (useManagedTypes)
+            {
+                return CodeGenerator.ToCSharpClassName(sanitizedName);
+            }
+
+            return sanitizedName;
         }
 
         return GetBasicTypeName(fieldType);
@@ -297,8 +479,8 @@ internal sealed class DiaEmitter
         // Handle special cases
         return baseType switch
         {
-            0 => "void",  // btVoid
-            1 => "void",  // btNoType
+            0 => "byte",  // btVoid
+            1 => "byte",  // btNoType
             6 => size == 4 ? "float" : "double",  // btFloat
             8 => "byte",  // btBCD
             10 => "bool", // btBool
@@ -323,5 +505,36 @@ internal sealed class DiaEmitter
             break;
         }
         return (SymTagEnum)t.symTag == SymTagEnum.SymTagUDT ? t : null;
+    }
+
+    private static bool IsInvalidTypeName(IDiaSymbol fieldType)
+    {
+        var tag = (SymTagEnum)fieldType.symTag;
+
+        // For UDTs, check if the type name is invalid
+        if (tag == SymTagEnum.SymTagUDT)
+        {
+            var typeName = fieldType.name;
+            if (string.IsNullOrWhiteSpace(typeName) ||
+                typeName.StartsWith("<") ||
+                typeName.StartsWith("__unnamed", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        // For arrays, check the element type
+        if (tag == SymTagEnum.SymTagArrayType)
+        {
+            var elemType = fieldType.type;
+            if (elemType != null && IsInvalidTypeName(elemType))
+            {
+                return true;
+            }
+        }
+
+        // For pointers, we generally keep them as they'll be IntPtr/ulong anyway
+
+        return false;
     }
 }

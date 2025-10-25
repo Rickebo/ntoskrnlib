@@ -84,7 +84,22 @@ internal sealed class CodeGenerator
                 ? $"__base{syntheticBaseIdx++}"
                 : TypeSpec.SanitizeIdentifier(f.Name);
 
+            // Skip fields with invalid names
+            if (f.Tag != DbgHelp.SymTag.BaseClass &&
+                (string.IsNullOrWhiteSpace(f.Name) ||
+                 f.Name.StartsWith("<") ||
+                 f.Name.StartsWith("__unnamed", StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
             var ts = _insp.ResolveType(f.TypeId);
+
+            // Skip fields with invalid type names (UDTs that reference unnamed types)
+            if (!_flattenUdts && IsInvalidTypeSpec(ts))
+            {
+                continue;
+            }
             TypeSyntax fieldType;
             var attrLists = new System.Collections.Generic.List<AttributeListSyntax>();
 
@@ -275,7 +290,28 @@ internal sealed class CodeGenerator
                 ? $"__base{syntheticBaseIdx++}"
                 : TypeSpec.SanitizeIdentifier(f.Name);
 
+            // Skip fields with invalid names
+            if (f.Tag != DbgHelp.SymTag.BaseClass &&
+                (string.IsNullOrWhiteSpace(f.Name) ||
+                 f.Name.StartsWith("<") ||
+                 f.Name.StartsWith("__unnamed", StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
             var ts = _insp.ResolveType(f.TypeId);
+
+            // Skip fields with invalid type names (UDTs that reference unnamed types)
+            if (!_flattenUdts && IsInvalidTypeSpec(ts))
+            {
+                continue;
+            }
+
+            // Check if property name matches the enclosing type name
+            if (string.Equals(fieldName, className, StringComparison.OrdinalIgnoreCase) && f.Tag != DbgHelp.SymTag.BaseClass)
+            {
+                fieldName = "Base" + fieldName;
+            }
             TypeSyntax propType;
             var attrLists = new List<AttributeListSyntax>();
 
@@ -290,36 +326,156 @@ internal sealed class CodeGenerator
 
             if (_flattenUdts && ts.TryAsUdt(out _, out var udtSize))
             {
-                propType = SyntaxFactory.ArrayType(SyntaxFactory.PredefinedType(SyntaxFactory.Token(SyntaxKind.ByteKeyword)))
-                    .WithRankSpecifiers(SyntaxFactory.SingletonList(
-                        SyntaxFactory.ArrayRankSpecifier(
-                            SyntaxFactory.SingletonSeparatedList<ExpressionSyntax>(SyntaxFactory.OmittedArraySizeExpression()))));
+                // Flattened UDTs use DynamicArray
+                propType = SyntaxFactory.IdentifierName("DynamicArray");
+
+                // Add Length attribute for flattened UDTs
+                var lengthAttr = SyntaxFactory.Attribute(SyntaxFactory.IdentifierName("Length"))
+                    .WithArgumentList(
+                        SyntaxFactory.AttributeArgumentList(
+                            SyntaxFactory.SingletonSeparatedList(
+                                SyntaxFactory.AttributeArgument(
+                                    SyntaxFactory.LiteralExpression(
+                                        SyntaxKind.NumericLiteralExpression,
+                                        SyntaxFactory.Literal((int)udtSize))))));
+                attrLists.Add(SyntaxFactory.AttributeList(SyntaxFactory.SingletonSeparatedList(lengthAttr)));
             }
-            else if (ts.TryAsArray(out var elemSpec, out var _))
+            else if (ts.TryAsArray(out var elemSpec, out var arrayCount))
             {
-                var elemTypeName = elemSpec.ToCSharpFieldType().TrimEnd(']', '[');
-                propType = SyntaxFactory.ArrayType(TypeFromName(elemTypeName))
-                    .WithRankSpecifiers(SyntaxFactory.SingletonList(
-                        SyntaxFactory.ArrayRankSpecifier(
-                            SyntaxFactory.SingletonSeparatedList<ExpressionSyntax>(SyntaxFactory.OmittedArraySizeExpression()))));
+                // Arrays use DynamicArray
+                propType = SyntaxFactory.IdentifierName("DynamicArray");
+
+                // Add Length attribute for arrays
+                var lengthAttr = SyntaxFactory.Attribute(SyntaxFactory.IdentifierName("Length"))
+                    .WithArgumentList(
+                        SyntaxFactory.AttributeArgumentList(
+                            SyntaxFactory.SingletonSeparatedList(
+                                SyntaxFactory.AttributeArgument(
+                                    SyntaxFactory.LiteralExpression(
+                                        SyntaxKind.NumericLiteralExpression,
+                                        SyntaxFactory.Literal((int)arrayCount))))));
+                attrLists.Add(SyntaxFactory.AttributeList(SyntaxFactory.SingletonSeparatedList(lengthAttr)));
+            }
+            else if (ts.TryAsUdt(out var udtName, out _))
+            {
+                // For managed classes, use the managed class name (PascalCase)
+                var managedClassName = ToCSharpClassName(udtName);
+                propType = TypeFromName(managedClassName);
             }
             else
             {
                 propType = TypeFromName(ts.ToCSharpFieldType());
             }
 
-            var propDecl = SyntaxFactory.PropertyDeclaration(propType, SyntaxFactory.Identifier(fieldName))
-                .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword))
-                .WithAccessorList(
-                    SyntaxFactory.AccessorList(
-                        SyntaxFactory.List(new[]
-                        {
-                            SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
-                                .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken)),
-                            SyntaxFactory.AccessorDeclaration(SyntaxKind.SetAccessorDeclaration)
-                                .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken))
-                        })))
-                .WithAttributeLists(SyntaxFactory.List(attrLists));
+            PropertyDeclarationSyntax propDecl;
+
+            // Determine if this is a managed UDT type or array (both use DynamicStructure)
+            bool isManagedUdt = (!_flattenUdts && ts.TryAsUdt(out _, out _)) || ts.TryAsArray(out _, out _) || (_flattenUdts && ts.TryAsUdt(out _, out _));
+
+            if (isManagedUdt)
+            {
+                // For managed class properties: use ReadStructure<T>(nameof(PropertyName)) and WriteStructure(nameof(PropertyName), value)
+                var getter = SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
+                    .WithExpressionBody(
+                        SyntaxFactory.ArrowExpressionClause(
+                            SyntaxFactory.InvocationExpression(
+                                SyntaxFactory.GenericName("ReadStructure")
+                                    .WithTypeArgumentList(
+                                        SyntaxFactory.TypeArgumentList(
+                                            SyntaxFactory.SingletonSeparatedList(propType))))
+                                .WithArgumentList(
+                                    SyntaxFactory.ArgumentList(
+                                        SyntaxFactory.SingletonSeparatedList(
+                                            SyntaxFactory.Argument(
+                                                SyntaxFactory.InvocationExpression(
+                                                    SyntaxFactory.IdentifierName("nameof"))
+                                                    .WithArgumentList(
+                                                        SyntaxFactory.ArgumentList(
+                                                            SyntaxFactory.SingletonSeparatedList(
+                                                                SyntaxFactory.Argument(
+                                                                    SyntaxFactory.IdentifierName(fieldName)))))))))))
+                    .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
+
+                var setter = SyntaxFactory.AccessorDeclaration(SyntaxKind.SetAccessorDeclaration)
+                    .WithExpressionBody(
+                        SyntaxFactory.ArrowExpressionClause(
+                            SyntaxFactory.InvocationExpression(
+                                SyntaxFactory.IdentifierName("WriteStructure"))
+                                .WithArgumentList(
+                                    SyntaxFactory.ArgumentList(
+                                        SyntaxFactory.SeparatedList(new[]
+                                        {
+                                            SyntaxFactory.Argument(
+                                                SyntaxFactory.InvocationExpression(
+                                                    SyntaxFactory.IdentifierName("nameof"))
+                                                    .WithArgumentList(
+                                                        SyntaxFactory.ArgumentList(
+                                                            SyntaxFactory.SingletonSeparatedList(
+                                                                SyntaxFactory.Argument(
+                                                                    SyntaxFactory.IdentifierName(fieldName)))))),
+                                            SyntaxFactory.Argument(SyntaxFactory.IdentifierName("value"))
+                                        })))))
+                    .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
+
+                propDecl = SyntaxFactory.PropertyDeclaration(propType, SyntaxFactory.Identifier(fieldName))
+                    .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword))
+                    .WithAccessorList(
+                        SyntaxFactory.AccessorList(
+                            SyntaxFactory.List(new[] { getter, setter })))
+                    .WithAttributeLists(SyntaxFactory.List(attrLists));
+            }
+            else
+            {
+                // For primitive types, structs, and arrays: use ReadHere<T>(nameof(PropertyName)) and WriteHere(nameof(PropertyName), value)
+                var getter = SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
+                    .WithExpressionBody(
+                        SyntaxFactory.ArrowExpressionClause(
+                            SyntaxFactory.InvocationExpression(
+                                SyntaxFactory.GenericName("ReadHere")
+                                    .WithTypeArgumentList(
+                                        SyntaxFactory.TypeArgumentList(
+                                            SyntaxFactory.SingletonSeparatedList(propType))))
+                                .WithArgumentList(
+                                    SyntaxFactory.ArgumentList(
+                                        SyntaxFactory.SingletonSeparatedList(
+                                            SyntaxFactory.Argument(
+                                                SyntaxFactory.InvocationExpression(
+                                                    SyntaxFactory.IdentifierName("nameof"))
+                                                    .WithArgumentList(
+                                                        SyntaxFactory.ArgumentList(
+                                                            SyntaxFactory.SingletonSeparatedList(
+                                                                SyntaxFactory.Argument(
+                                                                    SyntaxFactory.IdentifierName(fieldName)))))))))))
+                    .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
+
+                var setter = SyntaxFactory.AccessorDeclaration(SyntaxKind.SetAccessorDeclaration)
+                    .WithExpressionBody(
+                        SyntaxFactory.ArrowExpressionClause(
+                            SyntaxFactory.InvocationExpression(
+                                SyntaxFactory.IdentifierName("WriteHere"))
+                                .WithArgumentList(
+                                    SyntaxFactory.ArgumentList(
+                                        SyntaxFactory.SeparatedList(new[]
+                                        {
+                                            SyntaxFactory.Argument(
+                                                SyntaxFactory.InvocationExpression(
+                                                    SyntaxFactory.IdentifierName("nameof"))
+                                                    .WithArgumentList(
+                                                        SyntaxFactory.ArgumentList(
+                                                            SyntaxFactory.SingletonSeparatedList(
+                                                                SyntaxFactory.Argument(
+                                                                    SyntaxFactory.IdentifierName(fieldName)))))),
+                                            SyntaxFactory.Argument(SyntaxFactory.IdentifierName("value"))
+                                        })))))
+                    .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
+
+                propDecl = SyntaxFactory.PropertyDeclaration(propType, SyntaxFactory.Identifier(fieldName))
+                    .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword))
+                    .WithAccessorList(
+                        SyntaxFactory.AccessorList(
+                            SyntaxFactory.List(new[] { getter, setter })))
+                    .WithAttributeLists(SyntaxFactory.List(attrLists));
+            }
 
             classDecl = classDecl.AddMembers(propDecl);
         }
@@ -374,5 +530,31 @@ internal sealed class CodeGenerator
         }
 
         return cu.NormalizeWhitespace().ToFullString();
+    }
+
+    private static bool IsInvalidTypeSpec(TypeSpec ts)
+    {
+        // Check if it's a UDT with an invalid name
+        if (ts.TryAsUdt(out var udtName, out var _))
+        {
+            if (string.IsNullOrWhiteSpace(udtName) ||
+                udtName.StartsWith("<") ||
+                udtName.StartsWith("__unnamed", StringComparison.OrdinalIgnoreCase) ||
+                udtName.All(c => c == '_'))
+            {
+                return true;
+            }
+        }
+
+        // Check if it's an array with an invalid element type
+        if (ts.TryAsArray(out var elemSpec, out var _))
+        {
+            if (IsInvalidTypeSpec(elemSpec))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

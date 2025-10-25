@@ -63,8 +63,28 @@ internal static class ProgramHelpers
 
         foreach (var (fname, ofs, ftype) in dia.GetFields(udt))
         {
+            // Skip fields with invalid names
+            if (string.IsNullOrWhiteSpace(fname) ||
+                fname.StartsWith("<") ||
+                fname.StartsWith("__unnamed", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             var fieldName = TypeSpec.SanitizeIdentifier(fname);
             var tag = (Dia2Lib.SymTagEnum)ftype.symTag;
+
+            // Skip fields with invalid UDT type names (when not flattening)
+            if (!flatten && tag == Dia2Lib.SymTagEnum.SymTagUDT)
+            {
+                var typeName = ftype.name;
+                if (string.IsNullOrWhiteSpace(typeName) ||
+                    typeName.StartsWith("<") ||
+                    typeName.StartsWith("__unnamed", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+            }
 
             var fieldOffsetAttr = SyntaxFactory.Attribute(SyntaxFactory.ParseName("FieldOffset"))
                 .WithArgumentList(SyntaxFactory.AttributeArgumentList(
