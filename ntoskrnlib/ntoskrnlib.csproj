@@ -24,9 +24,10 @@
     <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
   </PropertyGroup>
 
-  <!-- Explicitly include only *.g.cs files (not *.managed.g.cs) -->
+  <!-- Include all generated files (unmanaged structs and managed wrappers) -->
+  <!-- Build will fail if any generated files have syntax errors, forcing us to fix the generator -->
   <ItemGroup>
-    <Compile Include="Generated\**\*.g.cs" Exclude="Generated\**\*.managed.g.cs" />
+    <Compile Include="Generated\**\*.g.cs" />
   </ItemGroup>
 
 

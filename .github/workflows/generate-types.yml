@@ -88,7 +88,7 @@ jobs:
           echo "label=$label" >> $GITHUB_OUTPUT
 
   test:
-    name: Run tests
+    name: Build library and run tests
     runs-on: windows-latest
     needs: version
     permissions:
@@ -96,6 +96,7 @@ jobs:
     env:
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: true
+      WINVER_LABEL: Win11
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -105,7 +106,64 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
-      - name: Restore dependencies
+      - name: Prepare symbol tooling (PATH and cache)
+        shell: pwsh
+        run: |
+          $cache = Join-Path $env:RUNNER_TEMP 'symbols'
+          New-Item -ItemType Directory -Force -Path $cache | Out-Null
+          "_NT_SYMBOL_PATH=srv*$cache*https://msdl.microsoft.com/download/symbols" | Out-File -Append -FilePath $env:GITHUB_ENV
+          $candidates = @(
+            "$Env:ProgramFiles(x86)\Windows Kits\10\Debuggers\x64",
+            "$Env:ProgramFiles\Windows Kits\10\Debuggers\x64",
+            "$Env:ProgramFiles(x86)\Windows Kits\10\Debuggers\x86"
+          )
+          foreach ($p in $candidates) { if (Test-Path $p) { $p | Out-File -Append -FilePath $env:GITHUB_PATH; Write-Host "Added to PATH: $p" } }
+
+      - name: Attempt DIA registration (non-blocking)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function Register-Dia($dlls) {
+            foreach ($dll in $dlls) {
+              try {
+                if (Test-Path $dll) {
+                  Start-Process regsvr32.exe -ArgumentList '/s', $dll -Wait -NoNewWindow
+                  Write-Host "Registered DIA: $dll"
+                }
+              } catch { Write-Warning "Failed to register $($dll): $_" }
+            }
+          }
+
+          # Try to locate msdia140.dll in common Visual Studio locations present on hosted runners
+          $search = @(
+            "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\*\DIA SDK\bin\amd64\msdia140.dll",
+            "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\*\Common7\IDE\msdia140.dll",
+            "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\*\Common7\Packages\Debugger\msdia140.dll",
+            "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\*\DIA SDK\bin\amd64\msdia140.dll"
+          )
+          $found = @()
+          foreach ($pat in $search) { $found += Get-ChildItem -Path $pat -ErrorAction SilentlyContinue }
+
+          if ($found) {
+            Register-Dia ($found | Select-Object -ExpandProperty FullName -Unique)
+          } else {
+            Write-Warning 'msdia140.dll not found. Proceeding without DIA; DbgHelp path remains primary.'
+          }
+
+      - name: Generate types from config
+        shell: pwsh
+        run: |
+          # Generate all types defined in config/types.yml
+          dotnet run --project ntoskrnlib.Generator -- `
+            --config config/types.yml `
+            --out ntoskrnlib/Generated `
+            --winver "${{ env.WINVER_LABEL }}"
+
+      - name: Build main library (COMPILATION CHECK)
+        run: dotnet build ntoskrnlib\ntoskrnlib.csproj -c Release /p:SkipGenerateTypes=true
+
+      - name: Restore test dependencies
         run: dotnet restore ntoskrnlib.Tests/ntoskrnlib.Tests.csproj
 
       - name: Build test project
