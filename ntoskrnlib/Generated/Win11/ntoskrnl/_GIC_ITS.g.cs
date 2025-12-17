@@ -1,0 +1,23 @@
+#pragma warning disable CS0649
+using System;
+using System.Runtime.InteropServices;
+
+namespace ntoskrnlib.Win11.ntoskrnl
+{
+    [StructLayout(LayoutKind.Explicit, Size = 20)]
+    public partial struct _GIC_ITS
+    {
+        [FieldOffset(0)]
+        public byte Type;
+        [FieldOffset(1)]
+        public byte Length;
+        [FieldOffset(2)]
+        public ushort Reserved1;
+        [FieldOffset(4)]
+        public uint Identifier;
+        [FieldOffset(8)]
+        public ulong PhysicalAddress;
+        [FieldOffset(16)]
+        public uint Reserved2;
+    }
+}

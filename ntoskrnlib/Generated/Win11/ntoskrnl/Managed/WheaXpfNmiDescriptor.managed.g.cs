@@ -1,0 +1,26 @@
+using System;
+using System.Collections.Generic;
+using ntoskrnlib.Structure;
+
+namespace ntoskrnlib.Win11.ntoskrnl
+{
+    [DynamicStructure("ntoskrnl!_WHEA_XPF_NMI_DESCRIPTOR")]
+    public sealed class WheaXpfNmiDescriptor : DynamicStructure
+    {
+        [Offset(0UL)]
+        public ushort Type { get => ReadHere<ushort>(nameof(Type)); set => WriteHere(nameof(Type), value); }
+
+        [Offset(2UL)]
+        public byte Enabled { get => ReadHere<byte>(nameof(Enabled)); set => WriteHere(nameof(Enabled), value); }
+
+        public WheaXpfNmiDescriptor(IMemorySource memory, MemoryPointer baseAddress) : base(memory, baseAddress)
+        {
+        }
+
+        [RegisterMethod]
+        public static void Register()
+        {
+            DynamicStructure.Register<WheaXpfNmiDescriptor>();
+        }
+    }
+}

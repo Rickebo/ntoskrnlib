@@ -1,0 +1,17 @@
+#pragma warning disable CS0649
+using System;
+using System.Runtime.InteropServices;
+
+namespace ntoskrnlib.Win11.ntoskrnl
+{
+    [StructLayout(LayoutKind.Explicit, Size = 8)]
+    public partial struct _MI_ACTIVE_PFN
+    {
+        [FieldOffset(0)]
+        public _unnamed_tag_ Leaf;
+        [FieldOffset(0)]
+        public _unnamed_tag_ PageTable;
+        [FieldOffset(0)]
+        public ulong EntireActiveField;
+    }
+}

@@ -1,0 +1,13 @@
+#pragma warning disable CS0649
+using System;
+using System.Runtime.InteropServices;
+
+namespace ntoskrnlib.Win11.ntoskrnl
+{
+    [StructLayout(LayoutKind.Explicit, Size = 4)]
+    public partial struct PEPHANDLE__
+    {
+        [FieldOffset(0)]
+        public int unused;
+    }
+}

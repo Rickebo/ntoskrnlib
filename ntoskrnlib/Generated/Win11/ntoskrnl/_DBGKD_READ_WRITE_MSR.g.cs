@@ -1,0 +1,17 @@
+#pragma warning disable CS0649
+using System;
+using System.Runtime.InteropServices;
+
+namespace ntoskrnlib.Win11.ntoskrnl
+{
+    [StructLayout(LayoutKind.Explicit, Size = 12)]
+    public partial struct _DBGKD_READ_WRITE_MSR
+    {
+        [FieldOffset(0)]
+        public uint Msr;
+        [FieldOffset(4)]
+        public uint DataValueLow;
+        [FieldOffset(8)]
+        public uint DataValueHigh;
+    }
+}

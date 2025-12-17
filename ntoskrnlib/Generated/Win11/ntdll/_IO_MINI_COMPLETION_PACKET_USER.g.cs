@@ -1,0 +1,29 @@
+#pragma warning disable CS0649
+using System;
+using System.Runtime.InteropServices;
+
+namespace ntoskrnlib.Win11.ntdll
+{
+    [StructLayout(LayoutKind.Explicit, Size = 80)]
+    public partial struct _IO_MINI_COMPLETION_PACKET_USER
+    {
+        [FieldOffset(0)]
+        public _LIST_ENTRY ListEntry;
+        [FieldOffset(16)]
+        public uint PacketType;
+        [FieldOffset(24)]
+        public IntPtr KeyContext;
+        [FieldOffset(32)]
+        public IntPtr ApcContext;
+        [FieldOffset(40)]
+        public int IoStatus;
+        [FieldOffset(48)]
+        public ulong IoStatusInformation;
+        [FieldOffset(56)]
+        public IntPtr MiniPacketCallback;
+        [FieldOffset(64)]
+        public IntPtr Context;
+        [FieldOffset(72)]
+        public byte Allocated;
+    }
+}
