@@ -146,32 +146,21 @@ internal static class DbgHelp
         UdtUnion
     }
 
-    internal enum TI_GET : uint
-    {
-        CHILDRENCOUNT = 0x6,
-        LENGTH = 0x0C,
-        TYPE = 0x10,
-        DATAKIND = 0x11,
-        BASETYPE = 0x12,
-        TAG = 0x1C,
-        NAME = 0x0E,
-        UDTTYPE = 0x1000, // non-standard; use TAG with UDT then query UDT kind via UdtKind? In DbgHelp use TI_GET_UDTKIND = 0x1009
-    }
-
-    // The TI constants above are incomplete; define only those we use via explicit values
-    internal const uint TI_GET_SYMTAG = 0x1C;
-    internal const uint TI_GET_LENGTH = 0x0C;
-    internal const uint TI_GET_CHILDRENCOUNT = 0x06;
-    internal const uint TI_GET_TYPEID = 0x10;
-    internal const uint TI_GET_BASETYPE = 0x12;
-    internal const uint TI_GET_NAME = 0x0E;
-    internal const uint TI_GET_DATAKIND = 0x11;
-    internal const uint TI_GET_UDTKIND = 0x1009; // DbgHelp extension
-    internal const uint TI_GET_OFFSET = 0x15;
-    internal const uint TI_GET_ARRAYINDEXTYPEID = 0x24;
-    internal const uint TI_GET_ARRAYCOUNT = 0x23;
-    internal const uint TI_GET_BITPOSITION = 0x1007; // extension
-    internal const uint TI_FINDCHILDREN = 0x13;
+    // IMAGEHLP_SYMBOL_TYPE_INFO (dbghelp.h) values are sequential starting at 0.
+    // Only define the ones used by this project.
+    internal const uint TI_GET_SYMTAG = 0;          // TI_GET_SYMTAG
+    internal const uint TI_GET_NAME = 1;            // TI_GET_SYMNAME
+    internal const uint TI_GET_LENGTH = 2;          // TI_GET_LENGTH
+    internal const uint TI_GET_TYPEID = 4;          // TI_GET_TYPEID
+    internal const uint TI_GET_BASETYPE = 5;        // TI_GET_BASETYPE
+    internal const uint TI_GET_ARRAYINDEXTYPEID = 6;// TI_GET_ARRAYINDEXTYPEID
+    internal const uint TI_FINDCHILDREN = 7;        // TI_FINDCHILDREN
+    internal const uint TI_GET_DATAKIND = 8;        // TI_GET_DATAKIND
+    internal const uint TI_GET_OFFSET = 10;         // TI_GET_OFFSET
+    internal const uint TI_GET_ARRAYCOUNT = 12;     // TI_GET_COUNT
+    internal const uint TI_GET_CHILDRENCOUNT = 13;  // TI_GET_CHILDRENCOUNT
+    internal const uint TI_GET_BITPOSITION = 14;    // TI_GET_BITPOSITION
+    internal const uint TI_GET_UDTKIND = 24;        // TI_GET_UDTKIND
 
     [StructLayout(LayoutKind.Sequential)]
     internal unsafe struct SYMBOL_INFO
@@ -244,7 +233,7 @@ internal static class DbgHelp
     }
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
-    internal unsafe delegate bool SymEnumTypesProc(ref SYMBOL_INFO pSymInfo, uint SymbolSize, IntPtr UserContext);
+    internal unsafe delegate bool SymEnumTypesProc(SYMBOL_INFO* pSymInfo, uint SymbolSize, IntPtr UserContext);
 
     [DllImport("dbghelp.dll", SetLastError = true)]
     internal static extern SymOptions SymGetOptions();
@@ -305,45 +294,173 @@ internal static class DbgHelp
         SymEnumTypesProc enumSymbolsCallback,
         IntPtr UserContext);
 
-    [DllImport("dbghelp.dll", SetLastError = true)]
-    internal static extern bool SymGetTypeInfo(
-        IntPtr hProcess,
-        ulong ModBase,
-        uint TypeId,
-        uint GetWhat,
-        out ulong pInfo);
+    private enum SymGetTypeInfoEntryPoint
+    {
+        Unknown = 0,
+        Wide = 1,
+        Plain = 2,
+        Ansi = 3
+    }
 
-    [DllImport("dbghelp.dll", SetLastError = true)]
-    internal static extern bool SymGetTypeInfo(
-        IntPtr hProcess,
-        ulong ModBase,
-        uint TypeId,
-        uint GetWhat,
-        out uint pInfo);
+    private static volatile SymGetTypeInfoEntryPoint _symGetTypeInfoEntryPoint = SymGetTypeInfoEntryPoint.Unknown;
+    private static readonly object SymGetTypeInfoLock = new();
 
-    [DllImport("dbghelp.dll", SetLastError = true)]
-    internal static extern bool SymGetTypeInfo(
-        IntPtr hProcess,
-        ulong ModBase,
-        uint TypeId,
-        uint GetWhat,
-        out int pInfo);
+    internal static bool SymGetTypeInfoReturnsUnicodeStrings
+        => ResolveSymGetTypeInfoEntryPoint() != SymGetTypeInfoEntryPoint.Ansi;
 
-    [DllImport("dbghelp.dll", SetLastError = true)]
-    internal static extern bool SymGetTypeInfo(
-        IntPtr hProcess,
-        ulong ModBase,
-        uint TypeId,
-        uint GetWhat,
-        out IntPtr pInfo);
+    private static SymGetTypeInfoEntryPoint ResolveSymGetTypeInfoEntryPoint()
+    {
+        var cached = _symGetTypeInfoEntryPoint;
+        if (cached != SymGetTypeInfoEntryPoint.Unknown)
+        {
+            return cached;
+        }
 
-    [DllImport("dbghelp.dll", SetLastError = true)]
-    internal static extern bool SymGetTypeInfo(
+        lock (SymGetTypeInfoLock)
+        {
+            cached = _symGetTypeInfoEntryPoint;
+            if (cached != SymGetTypeInfoEntryPoint.Unknown)
+            {
+                return cached;
+            }
+
+            // Ensure dbghelp.dll is loaded. SymbolSession will usually load it first, but this keeps DbgHelp robust.
+            var hDbgHelp = GetModuleHandle("dbghelp.dll");
+            if (hDbgHelp == IntPtr.Zero)
+            {
+                hDbgHelp = LoadLibrary("dbghelp.dll");
+            }
+
+            if (hDbgHelp != IntPtr.Zero)
+            {
+                if (GetProcAddress(hDbgHelp, "SymGetTypeInfoW") != IntPtr.Zero)
+                {
+                    cached = SymGetTypeInfoEntryPoint.Wide;
+                }
+                else if (GetProcAddress(hDbgHelp, "SymGetTypeInfo") != IntPtr.Zero)
+                {
+                    cached = SymGetTypeInfoEntryPoint.Plain;
+                }
+                else if (GetProcAddress(hDbgHelp, "SymGetTypeInfoA") != IntPtr.Zero)
+                {
+                    cached = SymGetTypeInfoEntryPoint.Ansi;
+                }
+                else
+                {
+                    // Best-effort: fall back to plain and let P/Invoke surface any issues.
+                    cached = SymGetTypeInfoEntryPoint.Plain;
+                }
+            }
+            else
+            {
+                cached = SymGetTypeInfoEntryPoint.Plain;
+            }
+
+            _symGetTypeInfoEntryPoint = cached;
+            return cached;
+        }
+    }
+
+    [DllImport("dbghelp.dll", SetLastError = true, EntryPoint = "SymGetTypeInfo")]
+    private static extern bool SymGetTypeInfoPlain(
         IntPtr hProcess,
         ulong ModBase,
         uint TypeId,
         uint GetWhat,
         IntPtr pInfo);
+
+    [DllImport("dbghelp.dll", SetLastError = true, EntryPoint = "SymGetTypeInfoW")]
+    private static extern bool SymGetTypeInfoWide(
+        IntPtr hProcess,
+        ulong ModBase,
+        uint TypeId,
+        uint GetWhat,
+        IntPtr pInfo);
+
+    [DllImport("dbghelp.dll", SetLastError = true, EntryPoint = "SymGetTypeInfoA")]
+    private static extern bool SymGetTypeInfoAnsi(
+        IntPtr hProcess,
+        ulong ModBase,
+        uint TypeId,
+        uint GetWhat,
+        IntPtr pInfo);
+
+    private static bool SymGetTypeInfoRaw(
+        IntPtr hProcess,
+        ulong modBase,
+        uint typeId,
+        uint getWhat,
+        IntPtr pInfo)
+    {
+        return ResolveSymGetTypeInfoEntryPoint() switch
+        {
+            SymGetTypeInfoEntryPoint.Wide => SymGetTypeInfoWide(hProcess, modBase, typeId, getWhat, pInfo),
+            SymGetTypeInfoEntryPoint.Ansi => SymGetTypeInfoAnsi(hProcess, modBase, typeId, getWhat, pInfo),
+            _ => SymGetTypeInfoPlain(hProcess, modBase, typeId, getWhat, pInfo)
+        };
+    }
+
+    internal static unsafe bool SymGetTypeInfo(
+        IntPtr hProcess,
+        ulong ModBase,
+        uint TypeId,
+        uint GetWhat,
+        out ulong pInfo)
+    {
+        ulong value = 0;
+        var ok = SymGetTypeInfoRaw(hProcess, ModBase, TypeId, GetWhat, (IntPtr)(&value));
+        pInfo = value;
+        return ok;
+    }
+
+    internal static unsafe bool SymGetTypeInfo(
+        IntPtr hProcess,
+        ulong ModBase,
+        uint TypeId,
+        uint GetWhat,
+        out uint pInfo)
+    {
+        uint value = 0;
+        var ok = SymGetTypeInfoRaw(hProcess, ModBase, TypeId, GetWhat, (IntPtr)(&value));
+        pInfo = value;
+        return ok;
+    }
+
+    internal static unsafe bool SymGetTypeInfo(
+        IntPtr hProcess,
+        ulong ModBase,
+        uint TypeId,
+        uint GetWhat,
+        out int pInfo)
+    {
+        int value = 0;
+        var ok = SymGetTypeInfoRaw(hProcess, ModBase, TypeId, GetWhat, (IntPtr)(&value));
+        pInfo = value;
+        return ok;
+    }
+
+    internal static unsafe bool SymGetTypeInfo(
+        IntPtr hProcess,
+        ulong ModBase,
+        uint TypeId,
+        uint GetWhat,
+        out IntPtr pInfo)
+    {
+        IntPtr value = IntPtr.Zero;
+        var ok = SymGetTypeInfoRaw(hProcess, ModBase, TypeId, GetWhat, (IntPtr)(&value));
+        pInfo = value;
+        return ok;
+    }
+
+    internal static bool SymGetTypeInfo(
+        IntPtr hProcess,
+        ulong ModBase,
+        uint TypeId,
+        uint GetWhat,
+        IntPtr pInfo)
+    {
+        return SymGetTypeInfoRaw(hProcess, ModBase, TypeId, GetWhat, pInfo);
+    }
 
     [DllImport("kernel32.dll")]
     internal static extern IntPtr LocalFree(IntPtr hMem);
@@ -353,6 +470,12 @@ internal static class DbgHelp
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern IntPtr LoadLibrary(string lpFileName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
 
     internal static string GetLastErrorMessage()
     {

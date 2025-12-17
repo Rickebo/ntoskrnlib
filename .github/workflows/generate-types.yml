@@ -106,6 +106,10 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
+      - name: Install Debugging Tools for Windows
+        shell: pwsh
+        run: choco install windows-sdk-10.0 -y --no-progress
+
       - name: Prepare symbol tooling (PATH and cache)
         shell: pwsh
         run: |
@@ -209,6 +213,10 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
+      - name: Install Debugging Tools for Windows
+        shell: pwsh
+        run: choco install windows-sdk-10.0 -y --no-progress
+
       - name: Prepare symbol tooling (PATH and cache)
         shell: pwsh
         run: |
@@ -279,7 +287,10 @@ jobs:
           }
           Write-Host "Generated files total: $count"
           echo "count=$count" >> $env:GITHUB_OUTPUT
-          if ($count -eq 0) { Write-Warning 'No generated files were produced; continuing without failing CI.' }
+          if ($count -eq 0) {
+            Write-Error 'No generated files were produced. Failing CI to avoid publishing an empty package.'
+            exit 1
+          }
       - name: Pack with base version
         shell: pwsh
         run: |
@@ -309,10 +320,10 @@ jobs:
           $sizeKB = [math]::Round($dll.Length / 1KB, 2)
           Write-Host "Package DLL size: $sizeKB KB"
 
-          # Warn if DLL seems too small (less than 200KB suggests missing types)
+          # Fail if DLL seems too small (less than 200KB suggests missing types)
           if ($dll.Length -lt 200KB) {
-            Write-Warning "DLL size is suspiciously small ($sizeKB KB). Expected >200KB with generated types."
-            Write-Warning "The package may not contain all generated classes!"
+            Write-Error "DLL size is suspiciously small ($sizeKB KB). Expected >200KB with generated types."
+            exit 1
           } else {
             Write-Host "✓ Package validation passed - DLL size looks good" -ForegroundColor Green
           }
@@ -416,6 +427,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: ${{ steps.br.outputs.name }}
+          base: master
           title: "chore(gen): update generated sources for v${{ steps.out.outputs.version }}"
           body: |
             Automated update of generated sources.

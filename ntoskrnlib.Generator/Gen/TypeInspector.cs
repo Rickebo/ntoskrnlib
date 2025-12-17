@@ -18,7 +18,7 @@ internal sealed class TypeInspector
     public TypeInspector(SymbolSession session)
     {
         _session = session;
-        _proc = System.Diagnostics.Process.GetCurrentProcess().Handle;
+        _proc = session.ProcessHandle;
         _modBase = session.ModuleBase;
     }
 
@@ -42,7 +42,9 @@ internal sealed class TypeInspector
             return $"Type_{typeId}";
         try
         {
-            var s = Marshal.PtrToStringUni(pStr);
+            var s = DbgHelp.SymGetTypeInfoReturnsUnicodeStrings
+                ? Marshal.PtrToStringUni(pStr)
+                : Marshal.PtrToStringAnsi(pStr);
             return s ?? $"Type_{typeId}";
         }
         finally
@@ -84,7 +86,10 @@ internal sealed class TypeInspector
                 p->MaxNameLen = MaxNameLen;
                 if (!DbgHelp.SymGetTypeFromName(_proc, modBase, name, mem))
                 {
-                    System.Console.Error.WriteLine($"SymGetTypeFromName failed for '{name}' (modBase={(modBase==0?"0":"0x"+modBase.ToString("X"))}): {DbgHelp.GetLastErrorMessage()}");
+                    if (string.Equals(Environment.GetEnvironmentVariable("NTOSKRNLLIB_DBGHELP_TRACE"), "1", StringComparison.Ordinal))
+                    {
+                        System.Console.Error.WriteLine($"SymGetTypeFromName failed for '{name}' (modBase={(modBase==0?"0":"0x"+modBase.ToString("X"))}): {DbgHelp.GetLastErrorMessage()}");
+                    }
                     typeId = 0;
                     return false;
                 }
@@ -103,9 +108,10 @@ internal sealed class TypeInspector
         uint found = 0;
         unsafe
         {
-            bool Callback(ref DbgHelp.SYMBOL_INFO info, uint size, IntPtr ctx)
+            bool Callback(DbgHelp.SYMBOL_INFO* pInfo, uint size, IntPtr ctx)
             {
-                found = (uint)info.TypeIndex; // first match is good enough
+                if (pInfo == null) return false;
+                found = pInfo->TypeIndex; // first match is good enough
                 return false; // stop after first
             }
 
@@ -123,25 +129,24 @@ internal sealed class TypeInspector
 
     public IEnumerable<(uint typeId, string name)> EnumerateUdts()
     {
-        var list = new List<(uint, string)>();
+        var raw = new List<(uint typeIndex, uint index, string name)>();
         unsafe
         {
-            bool Callback(ref DbgHelp.SYMBOL_INFO info, uint size, IntPtr ctx)
+            bool Callback(DbgHelp.SYMBOL_INFO* pInfo, uint size, IntPtr ctx)
             {
                 // Only UDTs
-                var tag = (DbgHelp.SymTag)info.Tag;
+                if (pInfo == null) return true;
+                var tag = (DbgHelp.SymTag)pInfo->Tag;
                 if (tag == DbgHelp.SymTag.UDT)
                 {
-                    string name;
-                    unsafe
+                    byte* namePtr = &pInfo->Name;
+                    var name = Marshal.PtrToStringAnsi((IntPtr)namePtr, (int)pInfo->NameLen) ?? $"Type_{pInfo->TypeIndex}";
+                    raw.Add((pInfo->TypeIndex, pInfo->Index, name));
+
+                    if (raw.Count <= 10)
                     {
-                        fixed (DbgHelp.SYMBOL_INFO* pInfo = &info)
-                        {
-                            byte* namePtr = &pInfo->Name;
-                            name = Marshal.PtrToStringAnsi((IntPtr)namePtr, (int)info.NameLen) ?? $"Type_{info.TypeIndex}";
-                        }
+                        Console.WriteLine($"[Symbols] UDT enum '{name}': TypeIndex={pInfo->TypeIndex} Index={pInfo->Index} ModBase=0x{pInfo->ModBase:X}");
                     }
-                    list.Add(((uint)info.TypeIndex, name));
                 }
                 return true;
             }
@@ -150,6 +155,44 @@ internal sealed class TypeInspector
             if (!DbgHelp.SymEnumTypes(_proc, _modBase, del, IntPtr.Zero))
                 throw new InvalidOperationException("SymEnumTypes failed: " + DbgHelp.GetLastErrorMessage());
         }
+
+        static bool TryGetTypeLength(IntPtr proc, ulong modBase, uint candidate)
+            => candidate != 0 && DbgHelp.SymGetTypeInfo(proc, modBase, candidate, DbgHelp.TI_GET_LENGTH, out ulong _);
+
+        // Different dbghelp builds populate SYMBOL_INFO.TypeIndex vs SYMBOL_INFO.Index differently for SymEnumTypes.
+        // Pick the field that produces valid type info for this module, falling back to name lookup if needed.
+        bool typeIndexLooksValid = false;
+        bool indexLooksValid = false;
+        int probe = 0;
+        foreach (var e in raw)
+        {
+            if (!typeIndexLooksValid && TryGetTypeLength(_proc, _modBase, e.typeIndex)) typeIndexLooksValid = true;
+            if (!indexLooksValid && TryGetTypeLength(_proc, _modBase, e.index)) indexLooksValid = true;
+            if (++probe >= 32) break;
+        }
+
+        Console.WriteLine($"[Symbols] SymEnumTypes id mapping: TypeIndexValid={typeIndexLooksValid} IndexValid={indexLooksValid}");
+
+        var list = new List<(uint, string)>(raw.Count);
+        foreach (var e in raw)
+        {
+            uint id;
+            if (typeIndexLooksValid) id = e.typeIndex;
+            else if (indexLooksValid) id = e.index;
+            else if (TryGetTypeIdByName(e.name, out var resolved))
+            {
+                id = resolved;
+                if (list.Count < 10)
+                {
+                    var ok = DbgHelp.SymGetTypeInfo(_proc, _modBase, id, DbgHelp.TI_GET_LENGTH, out ulong len);
+                    Console.WriteLine($"[Symbols] Resolved '{e.name}' -> {id} (lenOk={ok}, len={(ok ? len : 0)})");
+                }
+            }
+            else continue;
+
+            list.Add((id, e.name));
+        }
+
         return list;
     }
 
@@ -221,7 +264,9 @@ internal sealed class TypeInspector
             return $"Field_{typeId}";
         try
         {
-            return Marshal.PtrToStringUni(pStr) ?? $"Field_{typeId}";
+            return (DbgHelp.SymGetTypeInfoReturnsUnicodeStrings
+                ? Marshal.PtrToStringUni(pStr)
+                : Marshal.PtrToStringAnsi(pStr)) ?? $"Field_{typeId}";
         }
         finally
         {
