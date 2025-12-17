@@ -406,25 +406,37 @@ internal sealed class GenerationRunner : IGenerationRunner
 
             foreach (var managedDir in managedDirs)
             {
-                var classFiles = Directory.GetFiles(managedDir, "*.g.cs");
+                var classFiles = Directory.GetFiles(managedDir, "*.managed.g.cs");
                 if (classFiles.Length == 0)
                 {
                     _log.LogTrace("No managed class files found in {dir}; skipping", managedDir);
                     continue;
                 }
 
-                // Extract class names from filenames (remove .g.cs extension)
+                // Extract class names from filenames (<Class>.managed.g.cs). Exclude the registry file itself.
                 var classNames = classFiles
                     .Select(f =>
                     {
-                        var nameWithoutExt = Path.GetFileNameWithoutExtension(f); // Removes .cs
-                        // Remove .g suffix if present
-                        return nameWithoutExt.EndsWith(".g")
-                            ? nameWithoutExt.Substring(0, nameWithoutExt.Length - 2)
-                            : nameWithoutExt;
+                        var file = Path.GetFileName(f);
+                        if (string.Equals(file, "StructureRegistry.managed.g.cs", StringComparison.OrdinalIgnoreCase))
+                            return null;
+
+                        const string suffix = ".managed.g.cs";
+                        if (file.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                            return file.Substring(0, file.Length - suffix.Length);
+
+                        // Fallback for unexpected filenames
+                        return Path.GetFileNameWithoutExtension(f);
                     })
+                    .Where(n => !string.IsNullOrWhiteSpace(n))
                     .OrderBy(n => n)
                     .ToList();
+
+                if (classNames.Count == 0)
+                {
+                    _log.LogTrace("No registerable managed class files found in {dir}; skipping", managedDir);
+                    continue;
+                }
 
                 // Determine namespace from parent directory
                 var moduleDir = Path.GetFileName(Path.GetDirectoryName(managedDir)!);

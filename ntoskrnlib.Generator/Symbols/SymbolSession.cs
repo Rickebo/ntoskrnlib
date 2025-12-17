@@ -10,17 +10,23 @@ namespace ntoskrnlib.Symbols;
 [SupportedOSPlatform("windows")]
 internal sealed class SymbolSession : IDisposable
 {
+    private readonly Process _currentProcess;
     private readonly IntPtr _process;
     private bool _initialized;
     public ulong ModuleBase { get; private set; }
     public string ModulePath { get; }
+    public IntPtr ProcessHandle => _process;
 
     public SymbolSession(string modulePath, string? symbolPath = null)
     {
         if (string.IsNullOrWhiteSpace(modulePath)) throw new ArgumentNullException(nameof(modulePath));
         if (!File.Exists(modulePath)) throw new FileNotFoundException("Module not found", modulePath);
         ModulePath = modulePath;
-        _process = Process.GetCurrentProcess().Handle;
+        // Keep the Process instance alive for the lifetime of the session.
+        // Otherwise the handle returned by Process.GetCurrentProcess().Handle can be finalized and closed,
+        // which breaks subsequent DbgHelp calls with ERROR_INVALID_HANDLE.
+        _currentProcess = Process.GetCurrentProcess();
+        _process = _currentProcess.Handle;
 
         // Hint the loader to find symsrv/dbghelp in Debugging Tools if installed
         TryAddDebuggersToDllSearchPath();
@@ -64,28 +70,55 @@ internal sealed class SymbolSession : IDisposable
         {
             var pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
             var pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-            var candidates = new[]
+            var candidates = new System.Collections.Generic.List<string>();
+
+            if (Environment.Is64BitProcess)
             {
-                System.IO.Path.Combine(pf86, "Windows Kits", "10", "Debuggers", "x64"),
-                System.IO.Path.Combine(pf, "Windows Kits", "10", "Debuggers", "x64"),
-                System.IO.Path.Combine(pf86, "Windows Kits", "10", "Debuggers", "x86"),
-            };
+                // Prefer x64 Debugging Tools (dbghelp/symsrv) if present.
+                candidates.Add(System.IO.Path.Combine(pf86, "Windows Kits", "11", "Debuggers", "x64"));
+                candidates.Add(System.IO.Path.Combine(pf86, "Windows Kits", "10", "Debuggers", "x64"));
+                candidates.Add(System.IO.Path.Combine(pf, "Windows Kits", "11", "Debuggers", "x64"));
+                candidates.Add(System.IO.Path.Combine(pf, "Windows Kits", "10", "Debuggers", "x64"));
+            }
+            else
+            {
+                candidates.Add(System.IO.Path.Combine(pf86, "Windows Kits", "11", "Debuggers", "x86"));
+                candidates.Add(System.IO.Path.Combine(pf86, "Windows Kits", "10", "Debuggers", "x86"));
+            }
+
             foreach (var c in candidates)
             {
-                if (System.IO.Directory.Exists(c))
+                if (!System.IO.Directory.Exists(c))
+                    continue;
+
+                if (!DbgHelp.SetDllDirectory(c))
+                    continue;
+
+                var dbghelp = System.IO.Path.Combine(c, "dbghelp.dll");
+                if (!System.IO.File.Exists(dbghelp))
+                    continue;
+
+                // Load dbghelp from the Debugging Tools folder so all subsequent DbgHelp P/Invokes bind to it.
+                if (DbgHelp.LoadLibrary(dbghelp) == IntPtr.Zero)
+                    continue;
+
+                var symsrv = System.IO.Path.Combine(c, "symsrv.dll");
+                if (System.IO.File.Exists(symsrv))
                 {
-                    DbgHelp.SetDllDirectory(c);
-                    var dbghelp = System.IO.Path.Combine(c, "dbghelp.dll");
-                    if (System.IO.File.Exists(dbghelp))
+                    DbgHelp.LoadLibrary(symsrv);
+                }
+
+                Console.WriteLine($"[Symbols] Using Debugging Tools directory: {c}");
+                try
+                {
+                    var ver = FileVersionInfo.GetVersionInfo(dbghelp).FileVersion;
+                    if (!string.IsNullOrWhiteSpace(ver))
                     {
-                        DbgHelp.LoadLibrary(dbghelp);
-                    }
-                    var symsrv = System.IO.Path.Combine(c, "symsrv.dll");
-                    if (System.IO.File.Exists(symsrv))
-                    {
-                        DbgHelp.LoadLibrary(symsrv);
+                        Console.WriteLine($"[Symbols] dbghelp.dll version: {ver}");
                     }
                 }
+                catch { }
+                return;
             }
         }
         catch { }
@@ -117,5 +150,7 @@ internal sealed class SymbolSession : IDisposable
             DbgHelp.SymCleanup(_process);
             _initialized = false;
         }
+
+        _currentProcess.Dispose();
     }
 }

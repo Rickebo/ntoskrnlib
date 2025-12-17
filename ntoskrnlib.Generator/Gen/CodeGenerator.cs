@@ -250,7 +250,18 @@ internal sealed class CodeGenerator
     public string GenerateUdtAsClass(uint typeId, string? moduleSymbolPrefix = null)
     {
         var nameOriginal = _insp.GetTypeName(typeId);
-        var className = ToCSharpClassName(nameOriginal);
+        // Some PDB types are named like "<unnamed-tag>" which is not a valid C# identifier or filename.
+        // Derive a safe name for the managed wrapper from a sanitized identifier.
+        var safeName = TypeSpec.SanitizeIdentifier(nameOriginal);
+        var className = ToCSharpClassName(safeName);
+        if (string.IsNullOrWhiteSpace(className))
+        {
+            className = $"Type{typeId}";
+        }
+        else if (char.IsDigit(className[0]))
+        {
+            className = "_" + className;
+        }
 
         // compilation unit with usings
         var cu = SyntaxFactory.CompilationUnit()

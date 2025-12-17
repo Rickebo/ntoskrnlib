@@ -61,7 +61,15 @@ internal sealed class UdtEmitter
             try
             {
                 var classCode = _gen.GenerateUdtAsClass(typeId, _moduleSym);
-                var className = CodeGenerator.ToCSharpClassName(name);
+                var className = CodeGenerator.ToCSharpClassName(TypeSpec.SanitizeIdentifier(name));
+                if (string.IsNullOrWhiteSpace(className))
+                {
+                    className = $"Type{typeId}";
+                }
+                else if (char.IsDigit(className[0]))
+                {
+                    className = "_" + className;
+                }
                 var classDir = Path.Combine(outputDir, "Managed");
                 Directory.CreateDirectory(classDir);
                 var classFile = Path.Combine(classDir, className + ".managed.g.cs");
