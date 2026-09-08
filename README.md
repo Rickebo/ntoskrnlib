@@ -42,7 +42,7 @@ Notes
   - `dotnet build ntoskrnlib\ntoskrnlib.csproj -c Release`
 - Pack with your desired version (builds and generates by default):
   - `dotnet pack ntoskrnlib\ntoskrnlib.csproj -c Release -o artifacts /p:PackageVersion=1.2.3`
-- Publish to NuGet (requires an API key):
+- Publish to NuGet locally (requires an API key):
   - `dotnet nuget push artifacts\ntoskrnlib.1.2.3.nupkg --api-key <NUGET_API_KEY> --source https://api.nuget.org/v3/index.json --skip-duplicate`
 
 Tip: Use `--no-build` on `dotnet pack` after you’ve already built to avoid re‑invoking the build step that may clear `Generated/` locally.
@@ -55,7 +55,7 @@ Note: Generation is now wired into the library build. If you want to skip it (e.
   - Automatically increments the patch when the newly built `ntoskrnlib.dll` differs from the latest published NuGet version.
   - Manual dispatch can optionally provide an explicit version to publish.
 - Publishing:
-  - Packs and publishes only when content changed and `NUGET_API_KEY` is set in repo secrets.
+  - Packs and publishes only when content changed, using NuGet trusted publishing and a short-lived credential obtained through GitHub OIDC.
   - Commits the updated `ntoskrnlib/Generated` back to the repo and tags the commit (`vX.Y.Z`).
 
 ## CLI Reference
