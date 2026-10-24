@@ -1,5 +1,22 @@
 # ntoskrnlib
 
+## Quick Start
+`ntoskrnlib` contains generated C# interop types for Windows kernel and user-mode structures, plus a generator CLI that can produce those layouts from PDB symbols. Once `_EPROCESS` has been generated from `ntoskrnl.exe`, you can import it and read process and thread state directly from memory.
+
+```csharp
+using System;
+using System.Runtime.InteropServices;
+using ntoskrnlib.Generated.Win25H2.nt;
+
+IntPtr eprocessPtr = GetEprocessPointer();
+
+_EPROCESS process = Marshal.PtrToStructure<_EPROCESS>(eprocessPtr);
+Console.WriteLine($"Active threads: {process.ActiveThreads}");
+var threadList = process.ThreadListHead;
+```
+
+Generate `_EPROCESS` from `ntoskrnl.exe` with `ntoskrnlib.Generator`, then reference the generated namespace from your code.
+
 Interop types for Windows kernel/user structures generated from PDB symbols, plus a generator CLI that produces strongly-typed C# layouts using Roslyn.
 
 - Library (NuGet): `ntoskrnlib` (netstandard2.0) — contains the generated `struct` definitions.
